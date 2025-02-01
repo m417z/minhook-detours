@@ -45,6 +45,9 @@
     <ClCompile Include="SlimDetours\Transaction.c">
       <Filter>Source Files\SlimDetours</Filter>
     </ClCompile>
+    <ClCompile Include="MinHook.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="SlimDetours\Utils.inl">
@@ -60,6 +63,9 @@
   <ItemGroup>
     <ClInclude Include="SlimDetours\SlimDetours.h">
       <Filter>Header Files\SlimDetours</Filter>
+    </ClInclude>
+    <ClInclude Include="MinHook.h">
+      <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>
