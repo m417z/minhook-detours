@@ -18,17 +18,22 @@ typedef struct _HOOK_ENTRY
 	LPVOID pTarget;
 	LPVOID pDetour;
 	LPVOID pTargetOrTrampoline;
-	LPVOID* ppOriginal;
+	LPVOID *ppOriginal;
 	UINT8 isEnabled : 1;
 	UINT8 queueEnable : 1;
-} HOOK_ENTRY, * PHOOK_ENTRY;
+	HRESULT bulkLastError;
+} HOOK_ENTRY, *PHOOK_ENTRY;
 
 static CRITICAL_SECTION g_criticalSection;
 
 static BOOL g_initialized = FALSE;
 
 // Thread freeze related variables.
-MH_THREAD_FREEZE_METHOD g_threadFreezeMethod = MH_FREEZE_METHOD_ORIGINAL;
+static MH_THREAD_FREEZE_METHOD g_threadFreezeMethod = MH_FREEZE_METHOD_ORIGINAL;
+
+// Bulk operation related variables.
+static BOOL g_bulkContinueOnError = FALSE;
+static MH_ERROR_CALLBACK g_bulkErrorCallback = NULL;
 
 // Hook entries.
 struct
@@ -140,7 +145,7 @@ static BOOL IsExecutableAddress(LPVOID pAddress)
 	return (mi.State == MEM_COMMIT && (mi.Protect & PAGE_EXECUTE_FLAGS));
 }
 
-static MH_STATUS CreateHook(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDetour, LPVOID* ppOriginal)
+static MH_STATUS CreateHook(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDetour, LPVOID *ppOriginal)
 {
 	MH_STATUS status = MH_OK;
 
@@ -179,6 +184,7 @@ static MH_STATUS CreateHook(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDetour,
 
 			pHook->isEnabled = FALSE;
 			pHook->queueEnable = FALSE;
+			pHook->bulkLastError = S_OK;
 		}
 		else
 		{
@@ -215,45 +221,50 @@ static MH_STATUS EnableHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL enable)
 						hr = SlimDetoursDetach(pHook->ppOriginal, pHook->pDetour);
 					}
 
-					// Instead of stopping on the first error, we enable as much
-					// hooks as we can, and return the last error, if any.
+					pHook->bulkLastError = hr;
 
-					// TODO: add callback for logs.
-					// TODO: make configurable to stop on first error
-					if (SUCCEEDED(hr))
+					if (g_bulkContinueOnError)
 					{
-						pHook->queueEnable = enable;
+						hr = S_OK;
 					}
-					else
+					else if (FAILED(hr))
 					{
-						pHook->queueEnable = !enable;
+						break;
 					}
 
 					pos = FindHookEntryEnabled(hookIdent, pTarget, pos + 1, !enable);
 				} while (pos != INVALID_HOOK_POS);
 
-				hr = SlimDetoursTransactionCommit();
 				if (SUCCEEDED(hr))
 				{
-					UINT pos = FindHookEntryEnabled(hookIdent, pTarget, 0, !enable);
-					while (pos != INVALID_HOOK_POS)
+					hr = SlimDetoursTransactionCommit();
+					if (SUCCEEDED(hr))
 					{
-						PHOOK_ENTRY pHook = &g_hooks.pItems[pos];
-						pHook->isEnabled = pHook->queueEnable;
-						pos = FindHookEntryEnabled(hookIdent, pTarget, pos + 1, !enable);
+						UINT pos = FindHookEntryEnabled(hookIdent, pTarget, 0, !enable);
+						while (pos != INVALID_HOOK_POS)
+						{
+							PHOOK_ENTRY pHook = &g_hooks.pItems[pos];
+							if (SUCCEEDED(pHook->bulkLastError))
+							{
+								pHook->isEnabled = enable;
+								pHook->queueEnable = enable;
+							}
+							else if (g_bulkErrorCallback)
+							{
+								g_bulkErrorCallback(pHook->pTarget, pHook->bulkLastError);
+							}
+							pos = FindHookEntryEnabled(hookIdent, pTarget, pos + 1, !enable);
+						}
+					}
+					else
+					{
+						status = MH_ERROR_DETOURS_TRANSACTION_COMMIT;
 					}
 				}
 				else
 				{
 					status = MH_ERROR_UNSUPPORTED_FUNCTION;
-
-					UINT pos = FindHookEntryEnabled(hookIdent, pTarget, 0, !enable);
-					while (pos != INVALID_HOOK_POS)
-					{
-						PHOOK_ENTRY pHook = &g_hooks.pItems[pos];
-						pHook->queueEnable = pHook->isEnabled;
-						pos = FindHookEntryEnabled(hookIdent, pTarget, pos + 1, !enable);
-					}
+					SlimDetoursTransactionAbort();
 				}
 			}
 			else
@@ -288,10 +299,11 @@ static MH_STATUS EnableHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL enable)
 						if (SUCCEEDED(hr))
 						{
 							pHook->isEnabled = enable;
+							pHook->queueEnable = enable;
 						}
 						else
 						{
-							status = MH_ERROR_UNSUPPORTED_FUNCTION;
+							status = MH_ERROR_DETOURS_TRANSACTION_COMMIT;
 						}
 					}
 					else
@@ -299,8 +311,6 @@ static MH_STATUS EnableHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL enable)
 						status = MH_ERROR_UNSUPPORTED_FUNCTION;
 						SlimDetoursTransactionAbort();
 					}
-
-					pHook->queueEnable = pHook->isEnabled;
 				}
 				else
 				{
@@ -386,41 +396,49 @@ static MH_STATUS ApplyQueued(ULONG_PTR hookIdent)
 					hr = SlimDetoursDetach(pHook->ppOriginal, pHook->pDetour);
 				}
 
-				// Instead of stopping on the first error, we enable as much
-				// hooks as we can, and return the last error, if any.
+				pHook->bulkLastError = hr;
 
-				// TODO: add callback for logs.
-				// TODO: make configurable to stop on first error
-				if (FAILED(hr))
+				if (g_bulkContinueOnError)
 				{
-					pHook->queueEnable = pHook->isEnabled;
+					hr = S_OK;
+				}
+				else if (FAILED(hr))
+				{
+					break;
 				}
 
 				pos = FindHookEntryQueued(hookIdent, MH_ALL_HOOKS, pos + 1);
 			} while (pos != INVALID_HOOK_POS);
 
-			hr = SlimDetoursTransactionCommit();
 			if (SUCCEEDED(hr))
 			{
-				UINT pos = FindHookEntryQueued(hookIdent, MH_ALL_HOOKS, 0);
-				while (pos != INVALID_HOOK_POS)
+				hr = SlimDetoursTransactionCommit();
+				if (SUCCEEDED(hr))
 				{
-					PHOOK_ENTRY pHook = &g_hooks.pItems[pos];
-					pHook->isEnabled = pHook->queueEnable;
-					pos = FindHookEntryQueued(hookIdent, MH_ALL_HOOKS, pos + 1);
+					UINT pos = FindHookEntryQueued(hookIdent, MH_ALL_HOOKS, 0);
+					while (pos != INVALID_HOOK_POS)
+					{
+						PHOOK_ENTRY pHook = &g_hooks.pItems[pos];
+						if (SUCCEEDED(pHook->bulkLastError))
+						{
+							pHook->isEnabled = pHook->queueEnable;
+						}
+						else if (g_bulkErrorCallback)
+						{
+							g_bulkErrorCallback(pHook->pTarget, pHook->bulkLastError);
+						}
+						pos = FindHookEntryQueued(hookIdent, MH_ALL_HOOKS, pos + 1);
+					}
+				}
+				else
+				{
+					status = MH_ERROR_DETOURS_TRANSACTION_COMMIT;
 				}
 			}
 			else
 			{
 				status = MH_ERROR_UNSUPPORTED_FUNCTION;
-
-				UINT pos = FindHookEntryQueued(hookIdent, MH_ALL_HOOKS, 0);
-				while (pos != INVALID_HOOK_POS)
-				{
-					PHOOK_ENTRY pHook = &g_hooks.pItems[pos];
-					pHook->queueEnable = pHook->isEnabled;
-					pos = FindHookEntryQueued(hookIdent, MH_ALL_HOOKS, pos + 1);
-				}
+				SlimDetoursTransactionAbort();
 			}
 		}
 		else
@@ -491,11 +509,26 @@ MH_STATUS WINAPI MH_SetThreadFreezeMethod(MH_THREAD_FREEZE_METHOD method)
 	return MH_OK;
 }
 
-MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID* ppOriginal)
+MH_STATUS WINAPI MH_SetBulkOperationMode(BOOL continueOnError, MH_ERROR_CALLBACK errorCallback)
+{
+	if (!g_initialized)
+		return MH_ERROR_NOT_INITIALIZED;
+
+	EnterCriticalSection(&g_criticalSection);
+
+	g_bulkContinueOnError = continueOnError;
+	g_bulkErrorCallback = errorCallback;
+
+	LeaveCriticalSection(&g_criticalSection);
+
+	return MH_OK;
+}
+
+MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOriginal)
 {
 	return MH_CreateHookEx(MH_DEFAULT_IDENT, pTarget, pDetour, ppOriginal);
 }
-MH_STATUS WINAPI MH_CreateHookEx(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDetour, LPVOID* ppOriginal)
+MH_STATUS WINAPI MH_CreateHookEx(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDetour, LPVOID *ppOriginal)
 {
 	if (!g_initialized)
 		return MH_ERROR_NOT_INITIALIZED;
@@ -510,13 +543,13 @@ MH_STATUS WINAPI MH_CreateHookEx(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDe
 }
 
 MH_STATUS WINAPI MH_CreateHookApi(
-	LPCWSTR pszModule, LPCSTR pszProcName, LPVOID pDetour, LPVOID* ppOriginal)
+	LPCWSTR pszModule, LPCSTR pszProcName, LPVOID pDetour, LPVOID *ppOriginal)
 {
 	return MH_CreateHookApiEx(pszModule, pszProcName, pDetour, ppOriginal, NULL);
 }
 
 MH_STATUS WINAPI MH_CreateHookApiEx(
-	LPCWSTR pszModule, LPCSTR pszProcName, LPVOID pDetour, LPVOID* ppOriginal, LPVOID* ppTarget)
+	LPCWSTR pszModule, LPCSTR pszProcName, LPVOID pDetour, LPVOID *ppOriginal, LPVOID *ppTarget)
 {
 	HMODULE hModule;
 	LPVOID  pTarget;
@@ -662,15 +695,14 @@ MH_STATUS WINAPI MH_ApplyQueuedEx(ULONG_PTR hookIdent)
 	return status;
 }
 
-const char* WINAPI MH_StatusToString(MH_STATUS status)
+const char *WINAPI MH_StatusToString(MH_STATUS status)
 {
 #define MH_ST2STR(x)    \
     case x:             \
         return #x
 
 	switch (status)
-{
-		MH_ST2STR(MH_UNKNOWN);
+	{
 		MH_ST2STR(MH_OK);
 		MH_ST2STR(MH_ERROR_ALREADY_INITIALIZED);
 		MH_ST2STR(MH_ERROR_NOT_INITIALIZED);

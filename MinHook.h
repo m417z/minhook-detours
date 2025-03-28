@@ -1,4 +1,4 @@
-﻿/*
+/*
  *  MinHook - The Minimalistic API Hooking Library for x64/x86
  *  Copyright (C) 2009-2017 Tsuda Kageyu.
  *  All rights reserved.
@@ -33,9 +33,6 @@
 // MinHook Error Codes.
 typedef enum MH_STATUS
 {
-    // Unknown error. Should not be returned.
-    MH_UNKNOWN = -1,
-
     // Successful.
     MH_OK = 0,
 
@@ -64,6 +61,9 @@ typedef enum MH_STATUS
 
     // Detours failed to begin the hooking transaction.
     MH_ERROR_DETOURS_TRANSACTION_BEGIN,
+
+    // Detours failed to commit the hooking transaction.
+    MH_ERROR_DETOURS_TRANSACTION_COMMIT,
 
     // The specified target function cannot be hooked.
     MH_ERROR_UNSUPPORTED_FUNCTION,
@@ -100,6 +100,8 @@ typedef enum MH_THREAD_FREEZE_METHOD
     MH_FREEZE_METHOD_NONE_UNSAFE
 } MH_THREAD_FREEZE_METHOD;
 
+typedef void(WINAPI *MH_ERROR_CALLBACK)(LPVOID pTarget, NTSTATUS detoursStatus);
+
 // Can be passed as a parameter to MH_EnableHook, MH_DisableHook,
 // MH_QueueEnableHook or MH_QueueDisableHook.
 #define MH_ALL_HOOKS NULL
@@ -111,16 +113,22 @@ typedef enum MH_THREAD_FREEZE_METHOD
 extern "C" {
 #endif
 
-    // Initialize the MinHook library. You must call this function EXACTLY ONCE
+    // Initializes the MinHook library. You must call this function EXACTLY ONCE
     // at the beginning of your program.
     MH_STATUS WINAPI MH_Initialize(VOID);
 
-    // Uninitialize the MinHook library. You must call this function EXACTLY
+    // Uninitializes the MinHook library. You must call this function EXACTLY
     // ONCE at the end of your program.
     MH_STATUS WINAPI MH_Uninitialize(VOID);
 
-    // Set the method of suspending and resuming threads.
+    // Sets the method of suspending and resuming threads.
     MH_STATUS WINAPI MH_SetThreadFreezeMethod(MH_THREAD_FREEZE_METHOD method);
+
+    // Configures the behavior of bulk operations, e.g. when a function is
+    // called with MH_ALL_HOOKS. By default, execution stops at the first error.
+    // This function allows operations to continue on error and optionally
+    // provides a callback to get notified about errors that occurred.
+    MH_STATUS WINAPI MH_SetBulkOperationMode(BOOL continueOnError, MH_ERROR_CALLBACK errorCallback);
 
     // Creates a hook for the specified target function, in disabled state.
     // Parameters:
@@ -239,7 +247,7 @@ extern "C" {
     MH_STATUS WINAPI MH_ApplyQueuedEx(ULONG_PTR hookIdent);
 
     // Translates the MH_STATUS to its name as a string.
-    const char * WINAPI MH_StatusToString(MH_STATUS status);
+    const char *WINAPI MH_StatusToString(MH_STATUS status);
 
 #ifdef __cplusplus
 }
