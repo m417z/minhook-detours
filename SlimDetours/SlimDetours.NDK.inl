@@ -48,10 +48,15 @@ typedef ULONG LOGICAL, *PLOGICAL;
 /* Add KNSoft.NDK specific stuff */
 #ifndef _USE_KNSOFT_NDK 
 
+/* Use phnt */
 #include <phnt_windows.h>
 #include <phnt.h>
 #undef NtCurrentProcessId
 #undef NtCurrentThreadId
+#ifndef MAXUSHORT
+#define MAXUSHORT   0xffff      // winnt
+#endif
+
 
 #define PAGE_SIZE 0x1000
 #define MM_ALLOCATION_GRANULARITY 0x10000

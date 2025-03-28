@@ -217,7 +217,17 @@ SlimDetoursCOMHook(
     _Out_opt_ PVOID* ppOldFunc,
     _In_ PVOID pNewFunc)
 {
-    DETOUR_FUNC_TABLE_HOOK Hook = { ulOffset, ppOldFunc, pNewFunc };
+    DETOUR_FUNC_TABLE_HOOK Hook;
+
+    Hook.ulOffset = ulOffset;
+    if (ppOldFunc != NULL)
+    {
+        Hook.ppOldFunc = ppOldFunc;
+        Hook.pNewFunc = pNewFunc;
+    } else
+    {
+        Hook.ppOldFunc = &pNewFunc;
+    }
 
     return SlimDetoursCOMHooks(ppOldFunc != NULL, rCLSID, rIID, 1, &Hook);
 }

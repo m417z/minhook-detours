@@ -147,13 +147,20 @@ detour_thread_update(
         bUpdateContext = FALSE;
         if (o->fIsRemove)
         {
-            if (cxt.CONTEXT_PC >= (ULONG_PTR)o->pTrampoline &&
-                cxt.CONTEXT_PC < ((ULONG_PTR)o->pTrampoline + sizeof(o->pTrampoline)))
+            if (cxt.CONTEXT_PC >= (ULONG_PTR)o->pTrampoline->rbCode &&
+                cxt.CONTEXT_PC < ((ULONG_PTR)o->pTrampoline->rbCode + RTL_FIELD_SIZE(DETOUR_TRAMPOLINE, rbCode)))
             {
                 cxt.CONTEXT_PC = (ULONG_PTR)o->pbTarget +
                     detour_align_from_trampoline(o->pTrampoline, (BYTE)(cxt.CONTEXT_PC - (ULONG_PTR)o->pTrampoline));
                 bUpdateContext = TRUE;
             }
+#if defined(_AMD64_)
+            else if (cxt.CONTEXT_PC == (ULONG_PTR)o->pTrampoline->rbCodeIn)
+            {
+                cxt.CONTEXT_PC = (ULONG_PTR)o->pbTarget;
+                bUpdateContext = TRUE;
+            }
+#endif
         } else
         {
             if (cxt.CONTEXT_PC >= (ULONG_PTR)o->pbTarget &&
