@@ -583,6 +583,9 @@ MH_STATUS WINAPI MH_RemoveHookEx(ULONG_PTR hookIdent, LPVOID pTarget)
     EnterCriticalSection(&g_criticalSection);
 
     MH_STATUS status = EnableHook(hookIdent, pTarget, FALSE);
+    if (status == MH_ERROR_DISABLED)
+        status = MH_OK;
+
     RemoveDisabledHooks(hookIdent, pTarget);
 
     LeaveCriticalSection(&g_criticalSection);
