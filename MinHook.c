@@ -473,6 +473,9 @@ MH_STATUS WINAPI MH_Uninitialize(VOID)
     MH_STATUS status = EnableHook(MH_ALL_IDENTS, MH_ALL_HOOKS, FALSE);
     RemoveDisabledHooks(MH_ALL_IDENTS, MH_ALL_HOOKS);
 
+    if (status == MH_OK && g_hooks.size > 0)
+        status = MH_ERROR_UNABLE_TO_UNINITIALIZE;
+
     if (status != MH_OK)
     {
         LeaveCriticalSection(&g_criticalSection);

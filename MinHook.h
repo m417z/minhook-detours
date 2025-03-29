@@ -42,6 +42,9 @@ typedef enum MH_STATUS
     // MinHook is not initialized yet, or already uninitialized.
     MH_ERROR_NOT_INITIALIZED,
 
+    // MinHook can't be uninitialized due to hooks that failed to be removed.
+    MH_ERROR_UNABLE_TO_UNINITIALIZE,
+
     // The hook for the specified target function is already created.
     MH_ERROR_ALREADY_CREATED,
 
