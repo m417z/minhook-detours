@@ -240,12 +240,16 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="MinHook.h" />
+    <ClInclude Include="resource.h" />
     <ClInclude Include="SlimDetours\SlimDetours.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="SlimDetours\SlimDetours.inl" />
     <None Include="SlimDetours\SlimDetours.NDK.inl" />
     <None Include="SlimDetours\Utils.inl" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="minhook-detours.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
