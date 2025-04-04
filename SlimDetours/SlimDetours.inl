@@ -87,13 +87,13 @@ typedef struct _DETOUR_TRAMPOLINE
     DETOUR_ALIGN    rAlign[8];          // instruction alignment array.
     PBYTE           pbRemain;           // first instruction after moved code. [free list]
     PBYTE           pbDetour;           // first instruction of detour function.
-#if defined(_AMD64_)
+#if defined(_X86_) || defined(_AMD64_)
     BYTE            rbCodeIn[8];        // jmp [pbDetour]
 #endif
 } DETOUR_TRAMPOLINE, *PDETOUR_TRAMPOLINE;
 
 #if defined(_X86_)
-_STATIC_ASSERT(sizeof(DETOUR_TRAMPOLINE) == 72);
+_STATIC_ASSERT(sizeof(DETOUR_TRAMPOLINE) == 80);
 #elif defined(_AMD64_)
 _STATIC_ASSERT(sizeof(DETOUR_TRAMPOLINE) == 96);
 #elif defined(_ARM64_)
@@ -105,7 +105,8 @@ typedef struct _DETOUR_OPERATION DETOUR_OPERATION, *PDETOUR_OPERATION;
 struct _DETOUR_OPERATION
 {
     PDETOUR_OPERATION pNext;
-    BOOL fIsRemove;
+    BOOL fIsAdd : 1;
+    BOOL fIsRemove : 1;
     PBYTE* ppbPointer;
     PBYTE pbTarget;
     PDETOUR_TRAMPOLINE pTrampoline;
@@ -121,9 +122,20 @@ PVOID
 detour_memory_alloc(
     _In_ SIZE_T Size);
 
+_Must_inspect_result_
+_Ret_maybenull_
+_Post_writable_byte_size_(Size)
+PVOID
+detour_memory_realloc(
+    _Frees_ptr_opt_ PVOID BaseAddress,
+    _In_ SIZE_T Size);
+
 BOOL
 detour_memory_free(
     _Frees_ptr_ PVOID BaseAddress);
+
+VOID
+detour_memory_uninitialize(VOID);
 
 BOOL
 detour_memory_is_system_reserved(
@@ -158,9 +170,19 @@ detour_gen_jmp_immediate(
     _In_ PBYTE pbCode,
     _In_ PBYTE pbJmpVal);
 
+BOOL
+detour_is_jmp_immediate_to(
+    _In_ PBYTE pbCode,
+    _In_ PBYTE pbJmpVal);
+
 _Ret_notnull_
 PBYTE
 detour_gen_jmp_indirect(
+    _In_ PBYTE pbCode,
+    _In_ PBYTE* ppbJmpVal);
+
+BOOL
+detour_is_jmp_indirect_to(
     _In_ PBYTE pbCode,
     _In_ PBYTE* ppbJmpVal);
 
@@ -176,6 +198,11 @@ detour_gen_jmp_immediate(
 _Ret_notnull_
 PBYTE
 detour_gen_jmp_indirect(
+    _In_ PBYTE pbCode,
+    _In_ PULONG64 pbJmpVal);
+
+BOOL
+detour_is_jmp_indirect_to(
     _In_ PBYTE pbCode,
     _In_ PULONG64 pbJmpVal);
 

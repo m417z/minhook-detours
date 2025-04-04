@@ -31,6 +31,19 @@ HRESULT
 NTAPI
 SlimDetoursTransactionBegin(VOID);
 
+typedef struct _DETOUR_TRANSACTION_OPTIONS
+{
+    ULONG cbSize;
+    BOOL fSuspendThreads;
+} DETOUR_TRANSACTION_OPTIONS, *PDETOUR_TRANSACTION_OPTIONS;
+
+typedef const DETOUR_TRANSACTION_OPTIONS* PCDETOUR_TRANSACTION_OPTIONS;
+
+HRESULT
+NTAPI
+SlimDetoursTransactionBeginEx(
+    _In_ PCDETOUR_TRANSACTION_OPTIONS pOptions);
+
 HRESULT
 NTAPI
 SlimDetoursTransactionAbort(VOID);
@@ -63,6 +76,10 @@ SlimDetoursCopyInstruction(
     _In_ PVOID pSrc,
     _Out_opt_ PVOID* ppTarget,
     _Out_opt_ LONG* plExtra);
+
+HRESULT
+NTAPI
+SlimDetoursUninitialize(VOID);
 
 /* Inline Hook, base on Detours */
 

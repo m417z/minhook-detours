@@ -55,6 +55,18 @@ HRESULT
 NTAPI
 SlimDetoursTransactionBegin(VOID)
 {
+    DETOUR_TRANSACTION_OPTIONS Options;
+    Options.cbSize = sizeof(Options);
+    Options.fSuspendThreads = TRUE;
+
+    return SlimDetoursTransactionBeginEx(&Options);
+}
+
+HRESULT
+NTAPI
+SlimDetoursTransactionBeginEx(
+    _In_ PCDETOUR_TRANSACTION_OPTIONS pOptions)
+{
     NTSTATUS Status;
 
     // Make sure only one thread can start a transaction.
@@ -70,11 +82,18 @@ SlimDetoursTransactionBegin(VOID)
         goto fail;
     }
 
-    Status = detour_thread_suspend(&s_phSuspendedThreads, &s_ulSuspendedThreadCount);
-    if (!NT_SUCCESS(Status))
+    if (pOptions->fSuspendThreads)
     {
-        detour_runnable_trampoline_regions();
-        goto fail;
+        Status = detour_thread_suspend(&s_phSuspendedThreads, &s_ulSuspendedThreadCount);
+        if (!NT_SUCCESS(Status))
+        {
+            detour_runnable_trampoline_regions();
+            goto fail;
+        }
+    } else
+    {
+        s_phSuspendedThreads = NULL;
+        s_ulSuspendedThreadCount = 0;
     }
 
     s_pPendingOperations = NULL;
@@ -111,13 +130,10 @@ SlimDetoursTransactionAbort(VOID)
         pMem = o->pbTarget;
         sMem = o->pTrampoline->cbRestore;
         NtProtectVirtualMemory(NtCurrentProcess(), &pMem, &sMem, o->dwPerm, &dwOld);
-        if (!o->fIsRemove)
+        if (o->fIsAdd)
         {
-            if (o->pTrampoline)
-            {
-                detour_free_trampoline(o->pTrampoline);
-                o->pTrampoline = NULL;
-            }
+            detour_free_trampoline(o->pTrampoline);
+            o->pTrampoline = NULL;
         }
 
         PDETOUR_OPERATION n = o->pNext;
@@ -147,7 +163,7 @@ SlimDetoursTransactionCommit(VOID)
     DWORD dwOld;
 
     // Common variables.
-    PDETOUR_OPERATION o, n;
+    PDETOUR_OPERATION o, n, m;
     PBYTE pbCode;
     BOOL freed = FALSE;
     ULONG i;
@@ -162,70 +178,122 @@ SlimDetoursTransactionCommit(VOID)
         goto _exit;
     }
 
-    // Insert or remove each of the detours.
-    o = s_pPendingOperations;
-    do
+    // Insert each of the detours.
+    for (o = s_pPendingOperations; o != NULL; o = o->pNext)
     {
-        if (o->fIsRemove)
+        if (!o->fIsAdd)
+            continue;
+
+        DETOUR_TRACE("detours: pbTramp =%p, pbRemain=%p, pbDetour=%p, cbRestore=%u\n",
+            o->pTrampoline,
+            o->pTrampoline->pbRemain,
+            o->pTrampoline->pbDetour,
+            o->pTrampoline->cbRestore);
+
+        DETOUR_TRACE("detours: pbTarget=%p: "
+            "%02x %02x %02x %02x "
+            "%02x %02x %02x %02x "
+            "%02x %02x %02x %02x [before]\n",
+            o->pbTarget,
+            o->pbTarget[0], o->pbTarget[1], o->pbTarget[2], o->pbTarget[3],
+            o->pbTarget[4], o->pbTarget[5], o->pbTarget[6], o->pbTarget[7],
+            o->pbTarget[8], o->pbTarget[9], o->pbTarget[10], o->pbTarget[11]);
+
+        m = NULL;
+        if (!RtlEqualMemory(o->pbTarget, o->pTrampoline->rbRestore, o->pTrampoline->cbRestore))
+        {
+            DETOUR_TRACE("detours: target is modified\n");
+
+            for (n = s_pPendingOperations; n != o; n = n->pNext)
+            {
+                if (n->fIsAdd && n->pbTarget == o->pbTarget)
+                {
+                    m = n;
+                }
+            }
+        }
+
+        if (m != NULL)
+        {
+            DETOUR_TRACE("detours: chaining to last detour in the transaction\n");
+
+#if defined(_X86_) || defined(_AMD64_)
+            pbCode = detour_gen_jmp_indirect(o->pTrampoline->rbCode, &m->pTrampoline->pbDetour);
+#elif defined(_ARM64_)
+            pbCode = detour_gen_jmp_indirect(o->pTrampoline->rbCode, (ULONG64*)&(m->pTrampoline->pbDetour));
+#endif
+            o->pTrampoline->cbCode = 0;
+
+            CopyMemory(o->pTrampoline->rbRestore, o->pbTarget, m->pTrampoline->cbRestore);
+            o->pTrampoline->cbRestore = m->pTrampoline->cbRestore;
+
+            RtlZeroMemory(o->pTrampoline->rAlign, sizeof(o->pTrampoline->rAlign));
+            o->pTrampoline->pbRemain = o->pbTarget + o->pTrampoline->cbRestore;
+        }
+
+#if defined(_X86_) || defined(_AMD64_)
+        pbCode = detour_gen_jmp_indirect(o->pTrampoline->rbCodeIn, &o->pTrampoline->pbDetour);
+        NtFlushInstructionCache(NtCurrentProcess(), o->pTrampoline->rbCodeIn, pbCode - o->pTrampoline->rbCodeIn);
+        pbCode = detour_gen_jmp_immediate(o->pbTarget, o->pTrampoline->rbCodeIn);
+#elif defined(_ARM64_)
+        pbCode = detour_gen_jmp_indirect(o->pbTarget, (ULONG64*)&(o->pTrampoline->pbDetour));
+#endif
+        pbCode = detour_gen_brk(pbCode, o->pTrampoline->pbRemain);
+        NtFlushInstructionCache(NtCurrentProcess(), o->pbTarget, pbCode - o->pbTarget);
+
+        *o->ppbPointer = o->pTrampoline->rbCode;
+
+        DETOUR_TRACE("detours: pbTarget=%p: "
+            "%02x %02x %02x %02x "
+            "%02x %02x %02x %02x "
+            "%02x %02x %02x %02x [after]\n",
+            o->pbTarget,
+            o->pbTarget[0], o->pbTarget[1], o->pbTarget[2], o->pbTarget[3],
+            o->pbTarget[4], o->pbTarget[5], o->pbTarget[6], o->pbTarget[7],
+            o->pbTarget[8], o->pbTarget[9], o->pbTarget[10], o->pbTarget[11]);
+
+        DETOUR_TRACE("detours: pbTramp =%p: "
+            "%02x %02x %02x %02x "
+            "%02x %02x %02x %02x "
+            "%02x %02x %02x %02x\n",
+            o->pTrampoline,
+            o->pTrampoline->rbCode[0], o->pTrampoline->rbCode[1],
+            o->pTrampoline->rbCode[2], o->pTrampoline->rbCode[3],
+            o->pTrampoline->rbCode[4], o->pTrampoline->rbCode[5],
+            o->pTrampoline->rbCode[6], o->pTrampoline->rbCode[7],
+            o->pTrampoline->rbCode[8], o->pTrampoline->rbCode[9],
+            o->pTrampoline->rbCode[10], o->pTrampoline->rbCode[11]);
+    }
+
+    // Remove each of the detours.
+    for (o = s_pPendingOperations; o != NULL; o = o->pNext)
+    {
+        if (!o->fIsRemove)
+            continue;
+
+        // Check if the jmps still points where we expect, otherwise someone might have hooked us.
+        BOOL hookIsStillThere =
+#if defined(_X86_) || defined(_AMD64_)
+            detour_is_jmp_immediate_to(o->pbTarget, o->pTrampoline->rbCodeIn) &&
+            detour_is_jmp_indirect_to(o->pTrampoline->rbCodeIn, &o->pTrampoline->pbDetour);
+#elif defined(_ARM64_)
+            detour_is_jmp_indirect_to(o->pbTarget, (ULONG64*)&(o->pTrampoline->pbDetour));
+#endif
+
+        if (hookIsStillThere)
         {
             RtlCopyMemory(o->pbTarget, o->pTrampoline->rbRestore, o->pTrampoline->cbRestore);
             NtFlushInstructionCache(NtCurrentProcess(), o->pbTarget, o->pTrampoline->cbRestore);
-            *o->ppbPointer = o->pbTarget;
         } else
         {
-            DETOUR_TRACE("detours: pbTramp =%p, pbRemain=%p, pbDetour=%p, cbRestore=%u\n",
-                         o->pTrampoline,
-                         o->pTrampoline->pbRemain,
-                         o->pTrampoline->pbDetour,
-                         o->pTrampoline->cbRestore);
-
-            DETOUR_TRACE("detours: pbTarget=%p: "
-                         "%02x %02x %02x %02x "
-                         "%02x %02x %02x %02x "
-                         "%02x %02x %02x %02x [before]\n",
-                         o->pbTarget,
-                         o->pbTarget[0], o->pbTarget[1], o->pbTarget[2], o->pbTarget[3],
-                         o->pbTarget[4], o->pbTarget[5], o->pbTarget[6], o->pbTarget[7],
-                         o->pbTarget[8], o->pbTarget[9], o->pbTarget[10], o->pbTarget[11]);
-
-#if defined(_AMD64_)
-            pbCode = detour_gen_jmp_indirect(o->pTrampoline->rbCodeIn, &o->pTrampoline->pbDetour);
-            NtFlushInstructionCache(NtCurrentProcess(), o->pTrampoline->rbCodeIn, pbCode - o->pTrampoline->rbCodeIn);
-            pbCode = detour_gen_jmp_immediate(o->pbTarget, o->pTrampoline->rbCodeIn);
-#elif defined(_X86_)
-            pbCode = detour_gen_jmp_immediate(o->pbTarget, o->pTrampoline->pbDetour);
-#elif defined(_ARM64_)
-            pbCode = detour_gen_jmp_indirect(o->pbTarget, (ULONG64*)&(o->pTrampoline->pbDetour));
-#endif
-            pbCode = detour_gen_brk(pbCode, o->pTrampoline->pbRemain);
-            NtFlushInstructionCache(NtCurrentProcess(), o->pbTarget, pbCode - o->pbTarget);
-            *o->ppbPointer = o->pTrampoline->rbCode;
-            UNREFERENCED_PARAMETER(pbCode);
-
-            DETOUR_TRACE("detours: pbTarget=%p: "
-                         "%02x %02x %02x %02x "
-                         "%02x %02x %02x %02x "
-                         "%02x %02x %02x %02x [after]\n",
-                         o->pbTarget,
-                         o->pbTarget[0], o->pbTarget[1], o->pbTarget[2], o->pbTarget[3],
-                         o->pbTarget[4], o->pbTarget[5], o->pbTarget[6], o->pbTarget[7],
-                         o->pbTarget[8], o->pbTarget[9], o->pbTarget[10], o->pbTarget[11]);
-
-            DETOUR_TRACE("detours: pbTramp =%p: "
-                         "%02x %02x %02x %02x "
-                         "%02x %02x %02x %02x "
-                         "%02x %02x %02x %02x\n",
-                         o->pTrampoline,
-                         o->pTrampoline->rbCode[0], o->pTrampoline->rbCode[1],
-                         o->pTrampoline->rbCode[2], o->pTrampoline->rbCode[3],
-                         o->pTrampoline->rbCode[4], o->pTrampoline->rbCode[5],
-                         o->pTrampoline->rbCode[6], o->pTrampoline->rbCode[7],
-                         o->pTrampoline->rbCode[8], o->pTrampoline->rbCode[9],
-                         o->pTrampoline->rbCode[10], o->pTrampoline->rbCode[11]);
+            // Don't remove in this case, put in bypass mode and leak trampoline.
+            o->fIsRemove = FALSE;
+            o->pTrampoline->pbDetour = o->pTrampoline->rbCode;
+            DETOUR_TRACE("detours: Leaked hook on pbTarget=%p due to external hooking\n", o->pbTarget);
         }
 
-        o = o->pNext;
-    } while (o != NULL);
+        *o->ppbPointer = o->pbTarget;
+    }
 
     // Update any suspended threads.
     for (i = 0; i < s_ulSuspendedThreadCount; i++)
@@ -240,7 +308,7 @@ SlimDetoursTransactionCommit(VOID)
         pMem = o->pbTarget;
         sMem = o->pTrampoline->cbRestore;
         NtProtectVirtualMemory(NtCurrentProcess(), &pMem, &sMem, o->dwPerm, &dwOld);
-        if (o->fIsRemove && o->pTrampoline)
+        if (o->fIsRemove)
         {
             detour_free_trampoline(o->pTrampoline);
             o->pTrampoline = NULL;
@@ -462,6 +530,7 @@ fail:
                  pTrampoline->rbCode[8], pTrampoline->rbCode[9],
                  pTrampoline->rbCode[10], pTrampoline->rbCode[11]);
 
+    o->fIsAdd = TRUE;
     o->fIsRemove = FALSE;
     o->ppbPointer = (PBYTE*)ppPointer;
     o->pTrampoline = pTrampoline;
@@ -502,7 +571,7 @@ fail:
         return HRESULT_FROM_NT(Status);
     }
 
-    PDETOUR_TRAMPOLINE pTrampoline = (PDETOUR_TRAMPOLINE)detour_skip_jmp((PBYTE)*ppPointer);
+    PDETOUR_TRAMPOLINE pTrampoline = (PDETOUR_TRAMPOLINE)*ppPointer;
     pDetour = detour_skip_jmp((PBYTE)pDetour);
 
     ////////////////////////////////////// Verify that Trampoline is in place.
@@ -525,6 +594,7 @@ fail:
         goto fail;
     }
 
+    o->fIsAdd = FALSE;
     o->fIsRemove = TRUE;
     o->ppbPointer = (PBYTE*)ppPointer;
     o->pTrampoline = pTrampoline;
@@ -533,6 +603,14 @@ fail:
     o->pNext = s_pPendingOperations;
     s_pPendingOperations = o;
 
+    return HRESULT_FROM_NT(STATUS_SUCCESS);
+}
+
+HRESULT
+NTAPI
+SlimDetoursUninitialize(VOID)
+{
+    detour_memory_uninitialize();
     return HRESULT_FROM_NT(STATUS_SUCCESS);
 }
 
