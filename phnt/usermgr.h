@@ -28,7 +28,7 @@ typedef struct _CRED_PROV_CREDENTIAL
 
 // Contexts
 
-#if (PHNT_VERSION >= PHNT_THRESHOLD)
+#if (PHNT_VERSION >= PHNT_WINDOWS_10)
 
 // rev
 USERMGRAPI
@@ -61,7 +61,7 @@ USERMGRAPI
 HRESULT
 WINAPI
 UMgrQueryUserContextFromSid(
-    _In_ PWSTR SidString,
+    _In_ PCWSTR SidString,
     _Out_ PULONGLONG ContextToken
     );
 
@@ -70,7 +70,7 @@ USERMGRAPI
 HRESULT
 WINAPI
 UMgrQueryUserContextFromName(
-    _In_ PWSTR UserName,
+    _In_ PCWSTR UserName,
     _Out_ PULONGLONG ContextToken
     );
 
@@ -78,7 +78,7 @@ UMgrQueryUserContextFromName(
 
 // Tokens
 
-#if (PHNT_VERSION >= PHNT_THRESHOLD)
+#if (PHNT_VERSION >= PHNT_WINDOWS_10)
 
 // rev
 USERMGRAPI
@@ -111,7 +111,7 @@ USERMGRAPI
 HRESULT
 WINAPI
 UMgrQueryUserTokenFromSid(
-    _In_ PWSTR SidString,
+    _In_ PCWSTR SidString,
     _Out_ PHANDLE TokenHandle
     );
 
@@ -120,7 +120,7 @@ USERMGRAPI
 HRESULT
 WINAPI
 UMgrQueryUserTokenFromName(
-    _In_ PWSTR UserName,
+    _In_ PCWSTR UserName,
     _Out_ PHANDLE TokenHandle
     );
 
@@ -137,7 +137,7 @@ UMgrGetConstrainedUserToken(
 
 #endif
 
-#if (PHNT_VERSION >= PHNT_THRESHOLD2)
+#if (PHNT_VERSION >= PHNT_WINDOWS_10_TH2)
 
 // rev
 USERMGRAPI
@@ -159,7 +159,7 @@ UMgrGetImpersonationTokenForContext(
 
 #endif
 
-#if (PHNT_VERSION >= PHNT_REDSTONE)
+#if (PHNT_VERSION >= PHNT_WINDOWS_10_RS1)
 
 // rev
 USERMGRAPI
@@ -174,7 +174,7 @@ UMgrGetSessionActiveShellUserToken(
 
 // Single-session SKU
 
-#if (PHNT_VERSION >= PHNT_THRESHOLD)
+#if (PHNT_VERSION >= PHNT_WINDOWS_10)
 
 // rev
 USERMGRAPI
@@ -199,7 +199,7 @@ UMgrOpenProcessHandleForAccess(
 
 // Credentials
 
-#if (PHNT_VERSION >= PHNT_THRESHOLD)
+#if (PHNT_VERSION >= PHNT_WINDOWS_10)
 
 // rev
 USERMGRAPI

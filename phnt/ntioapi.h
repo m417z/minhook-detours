@@ -7,6 +7,13 @@
 #ifndef _NTIOAPI_H
 #define _NTIOAPI_H
 
+// Sharing mode
+
+#define FILE_SHARE_NONE                 0x00000000
+#define FILE_SHARE_READ                 0x00000001
+#define FILE_SHARE_WRITE                0x00000002
+#define FILE_SHARE_DELETE               0x00000004
+
 // Create disposition
 
 #define FILE_SUPERSEDE                      0x00000000
@@ -29,11 +36,6 @@
 #define FILE_NON_DIRECTORY_FILE             0x00000040
 #define FILE_CREATE_TREE_CONNECTION         0x00000080
 
-#if (PHNT_VERSION >= PHNT_REDSTONE5)
-#define TREE_CONNECT_NO_CLIENT_BUFFERING    0x00000008
-#define TREE_CONNECT_WRITE_THROUGH          0x00000002
-#endif
-
 #define FILE_COMPLETE_IF_OPLOCKED           0x00000100
 #define FILE_NO_EA_KNOWLEDGE                0x00000200
 #define FILE_OPEN_REMOTE_INSTANCE           0x00000400
@@ -44,30 +46,43 @@
 #define FILE_OPEN_FOR_BACKUP_INTENT         0x00004000
 #define FILE_NO_COMPRESSION                 0x00008000
 
-#if (PHNT_VERSION >= PHNT_WIN7)
 #define FILE_OPEN_REQUIRING_OPLOCK          0x00010000
 #define FILE_DISALLOW_EXCLUSIVE             0x00020000
-#endif
-#if (PHNT_VERSION >= PHNT_WIN8)
 #define FILE_SESSION_AWARE                  0x00040000
-#endif
 
 #define FILE_RESERVE_OPFILTER               0x00100000
 #define FILE_OPEN_REPARSE_POINT             0x00200000
 #define FILE_OPEN_NO_RECALL                 0x00400000
 #define FILE_OPEN_FOR_FREE_SPACE_QUERY      0x00800000
 
+#define TREE_CONNECT_WRITE_THROUGH          0x00000002
+#define TREE_CONNECT_NO_CLIENT_BUFFERING    0x00000008
+
 // Extended create/open flags
 
 #define FILE_CONTAINS_EXTENDED_CREATE_INFORMATION   0x10000000
 #define FILE_VALID_EXTENDED_OPTION_FLAGS            0x10000000
 
-#if (PHNT_VERSION >= PHNT_WIN11)
+typedef struct _EXTENDED_CREATE_DUAL_OPLOCK_KEYS 
+{
+    //
+    //  Parent oplock key.
+    //  All-zero if not set.
+    //
+    GUID ParentOplockKey;
+    //
+    //  Target oplock key.
+    //  All-zero if not set.
+    //
+    GUID TargetOplockKey;
+} EXTENDED_CREATE_DUAL_OPLOCK_KEYS, *PEXTENDED_CREATE_DUAL_OPLOCK_KEYS;
+
 typedef struct _EXTENDED_CREATE_INFORMATION
 {
     LONGLONG ExtendedCreateFlags;
     PVOID EaBuffer;
     ULONG EaLength;
+    //PEXTENDED_CREATE_DUAL_OPLOCK_KEYS DualOplockKeys; // since 24H2
 } EXTENDED_CREATE_INFORMATION, *PEXTENDED_CREATE_INFORMATION;
 
 typedef struct _EXTENDED_CREATE_INFORMATION_32
@@ -75,11 +90,11 @@ typedef struct _EXTENDED_CREATE_INFORMATION_32
     LONGLONG ExtendedCreateFlags;
     void* POINTER_32 EaBuffer;
     ULONG EaLength;
+    //PEXTENDED_CREATE_DUAL_OPLOCK_KEYS POINTER_32 DualOplockKeys; // since 24H2
 } EXTENDED_CREATE_INFORMATION_32, *PEXTENDED_CREATE_INFORMATION_32;
 
 #define EX_CREATE_FLAG_FILE_SOURCE_OPEN_FOR_COPY 0x00000001
 #define EX_CREATE_FLAG_FILE_DEST_OPEN_FOR_COPY   0x00000002
-#endif
 
 #define FILE_VALID_OPTION_FLAGS             0x00ffffff
 #define FILE_VALID_PIPE_OPTION_FLAGS        0x00000032
@@ -207,19 +222,13 @@ typedef struct _IO_STATUS_BLOCK
     ULONG_PTR Information;
 } IO_STATUS_BLOCK, *PIO_STATUS_BLOCK;
 
-typedef VOID (NTAPI *PIO_APC_ROUTINE)(
+typedef _Function_class_(IO_APC_ROUTINE)
+VOID NTAPI IO_APC_ROUTINE(
     _In_ PVOID ApcContext,
     _In_ PIO_STATUS_BLOCK IoStatusBlock,
     _In_ ULONG Reserved
     );
-
-// private
-typedef struct _FILE_IO_COMPLETION_INFORMATION
-{
-    PVOID KeyContext;
-    PVOID ApcContext;
-    IO_STATUS_BLOCK IoStatusBlock;
-} FILE_IO_COMPLETION_INFORMATION, *PFILE_IO_COMPLETION_INFORMATION;
+typedef IO_APC_ROUTINE* PIO_APC_ROUTINE;
 
 typedef enum _FILE_INFORMATION_CLASS
 {
@@ -309,27 +318,40 @@ typedef enum _FILE_INFORMATION_CLASS
     FileMaximumInformation
 } FILE_INFORMATION_CLASS, *PFILE_INFORMATION_CLASS;
 
+//
 // NtQueryInformationFile/NtSetInformationFile types
+//
 
+/**
+ * The FILE_BASIC_INFORMATION structure contains timestamps and basic attributes of a file.
+ * @li If you specify a value of zero for any of the XxxTime members, the file system keeps a file's current value for that time.
+ * @li If you specify a value of -1 for any of the XxxTime members, time stamp updates are disabled for I/O operations preformed on the file handle.
+ * @li If you specify a value of -2 for any of the XxxTime members, time stamp updates are enabled for I/O operations preformed on the file handle.
+ * @remarks To set the members of this structure, the caller must have FILE_WRITE_ATTRIBUTES access to the file.
+ */
 typedef struct _FILE_BASIC_INFORMATION
 {
-    LARGE_INTEGER CreationTime;
-    LARGE_INTEGER LastAccessTime;
-    LARGE_INTEGER LastWriteTime;
-    LARGE_INTEGER ChangeTime;
-    ULONG FileAttributes;
+    LARGE_INTEGER CreationTime;         // Specifies the time that the file was created.
+    LARGE_INTEGER LastAccessTime;       // Specifies the time that the file was last accessed.
+    LARGE_INTEGER LastWriteTime;        // Specifies the time that the file was last written to.
+    LARGE_INTEGER ChangeTime;           // Specifies the last time the file was changed.
+    ULONG FileAttributes;               // Specifies one or more FILE_ATTRIBUTE_XXX flags.
 } FILE_BASIC_INFORMATION, *PFILE_BASIC_INFORMATION;
 
+/**
+ * The FILE_STANDARD_INFORMATION structure contains standard information of a file.
+ * @remarks EndOfFile specifies the byte offset to the end of the file.
+ * Because this value is zero-based, it actually refers to the first free byte in the file; that is, it is the offset to the byte immediately following the last valid byte in the file.
+ */
 typedef struct _FILE_STANDARD_INFORMATION
 {
-    LARGE_INTEGER AllocationSize;
-    LARGE_INTEGER EndOfFile;
-    ULONG NumberOfLinks;
-    BOOLEAN DeletePending;
-    BOOLEAN Directory;
+    LARGE_INTEGER AllocationSize;       // The file allocation size in bytes. Usually, this value is a multiple of the sector or cluster size of the underlying physical device.
+    LARGE_INTEGER EndOfFile;            // The end of file location as a byte offset.
+    ULONG NumberOfLinks;                // The number of hard links to the file.
+    BOOLEAN DeletePending;              // The delete pending status. TRUE indicates that a file deletion has been requested.
+    BOOLEAN Directory;                  // The file directory status. TRUE indicates the file object represents a directory.
 } FILE_STANDARD_INFORMATION, *PFILE_STANDARD_INFORMATION;
 
-//#if (PHNT_VERSION >= PHNT_THRESHOLD)
 typedef struct _FILE_STANDARD_INFORMATION_EX
 {
     LARGE_INTEGER AllocationSize;
@@ -340,17 +362,16 @@ typedef struct _FILE_STANDARD_INFORMATION_EX
     BOOLEAN AlternateStream;
     BOOLEAN MetadataAttribute;
 } FILE_STANDARD_INFORMATION_EX, *PFILE_STANDARD_INFORMATION_EX;
-//#endif
 
 typedef struct _FILE_INTERNAL_INFORMATION
 {
     union
     {
-        LARGE_INTEGER IndexNumber;
+        ULARGE_INTEGER IndexNumber;
         struct
         {
-            LONGLONG MftRecordIndex : 48; // rev
-            LONGLONG SequenceNumber : 16; // rev
+            ULONGLONG MftRecordIndex : 48; // rev
+            ULONGLONG SequenceNumber : 16; // rev
         };
     };
 } FILE_INTERNAL_INFORMATION, *PFILE_INTERNAL_INFORMATION;
@@ -441,7 +462,7 @@ typedef struct _FILE_END_OF_FILE_INFORMATION
     LARGE_INTEGER EndOfFile;
 } FILE_END_OF_FILE_INFORMATION, *PFILE_END_OF_FILE_INFORMATION;
 
-//#if (PHNT_VERSION >= PHNT_REDSTONE5)
+//#if (PHNT_VERSION >= PHNT_WINDOWS_10_RS5)
 #define FLAGS_END_OF_FILE_INFO_EX_EXTEND_PAGING             0x00000001
 #define FLAGS_END_OF_FILE_INFO_EX_NO_EXTRA_PAGING_EXTEND    0x00000002
 #define FLAGS_END_OF_FILE_INFO_EX_TIME_CONSTRAINED          0x00000004
@@ -526,6 +547,9 @@ typedef struct _FILE_RENAME_INFORMATION_EX
     _Field_size_bytes_(FileNameLength) WCHAR FileName[1];
 } FILE_RENAME_INFORMATION_EX, *PFILE_RENAME_INFORMATION_EX;
 
+/**
+ * The FILE_STREAM_INFORMATION structure contains information about a file stream.
+ */
 typedef struct _FILE_STREAM_INFORMATION
 {
     ULONG NextEntryOffset;
@@ -535,6 +559,9 @@ typedef struct _FILE_STREAM_INFORMATION
     _Field_size_bytes_(StreamNameLength) WCHAR StreamName[1];
 } FILE_STREAM_INFORMATION, *PFILE_STREAM_INFORMATION;
 
+/**
+ * The FILE_TRACKING_INFORMATION structure contains information used for tracking file operations.
+ */
 typedef struct _FILE_TRACKING_INFORMATION
 {
     HANDLE DestinationFile;
@@ -542,18 +569,42 @@ typedef struct _FILE_TRACKING_INFORMATION
     _Field_size_bytes_(ObjectInformationLength) CHAR ObjectInformation[1];
 } FILE_TRACKING_INFORMATION, *PFILE_TRACKING_INFORMATION;
 
+/**
+ * The FILE_COMPLETION_INFORMATION structure contains the port handle and key for an I/O completion port created for a file handle.
+ *
+ * @remarks he FILE_COMPLETION_INFORMATION structure is used to replace the completion information for a port handle set in Port.
+ * Completion information is replaced with the ZwSetInformationFile routine with the FileInformationClass parameter set to FileReplaceCompletionInformation.
+ * The Port and Key members of FILE_COMPLETION_INFORMATION are set to their new values. To remove an existing completion port for a file handle, Port is set to NULL.
+ *
+ * https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_completion_information
+ */
 typedef struct _FILE_COMPLETION_INFORMATION
 {
     HANDLE Port;
     PVOID Key;
 } FILE_COMPLETION_INFORMATION, *PFILE_COMPLETION_INFORMATION;
 
+/**
+ * The FILE_PIPE_INFORMATION structure contains information about a named pipe that is not specific to the local or the remote end of the pipe.
+ *
+ * @remarks If ReadMode is set to FILE_PIPE_BYTE_STREAM_MODE, any attempt to change it must fail with a STATUS_INVALID_PARAMETER error code.
+ * When CompletionMode is set to FILE_PIPE_QUEUE_OPERATION, if the pipe is connected to, read to, or written from,
+ * the operation is not completed until there is data to read, all data is written, or a client is connected.
+ * When CompletionMode is set to FILE_PIPE_COMPLETE_OPERATION, if the pipe is being connected to, read to, or written from, the operation is completed immediately.
+ *
+ * https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_pipe_information
+ */
 typedef struct _FILE_PIPE_INFORMATION
 {
      ULONG ReadMode;
      ULONG CompletionMode;
 } FILE_PIPE_INFORMATION, *PFILE_PIPE_INFORMATION;
 
+/**
+ * The FILE_PIPE_LOCAL_INFORMATION structure contains information about the local end of a named pipe.
+ *
+ * @remarks https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_pipe_local_information
+ */
 typedef struct _FILE_PIPE_LOCAL_INFORMATION
 {
      ULONG NamedPipeType;
@@ -568,32 +619,54 @@ typedef struct _FILE_PIPE_LOCAL_INFORMATION
      ULONG NamedPipeEnd;
 } FILE_PIPE_LOCAL_INFORMATION, *PFILE_PIPE_LOCAL_INFORMATION;
 
+/**
+ * The FILE_PIPE_REMOTE_INFORMATION structure contains information about the remote end of a named pipe.
+ *
+ * @remarks Remote information is not available for local pipes or for the server end of a remote pipe.
+ * https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_pipe_remote_information
+ */
 typedef struct _FILE_PIPE_REMOTE_INFORMATION
 {
-     LARGE_INTEGER CollectDataTime;
-     ULONG MaximumCollectionCount;
+    LARGE_INTEGER CollectDataTime;  // The maximum amount of time, in 100-nanosecond intervals, that elapses before transmission of data from the client machine to the server.
+    ULONG MaximumCollectionCount;   // The maximum size, in bytes, of data that will be collected on the client machine before transmission to the server.
 } FILE_PIPE_REMOTE_INFORMATION, *PFILE_PIPE_REMOTE_INFORMATION;
 
+/**
+ * The FILE_MAILSLOT_QUERY_INFORMATION structure contains information about a mailslot.
+ *
+ * @remarks https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_mailslot_query_information
+ */
 typedef struct _FILE_MAILSLOT_QUERY_INFORMATION
 {
-    ULONG MaximumMessageSize;
-    ULONG MailslotQuota;
-    ULONG NextMessageSize;
-    ULONG MessagesAvailable;
-    LARGE_INTEGER ReadTimeout;
+    ULONG MaximumMessageSize;       // The maximum size, in bytes, of a single message that can be written to the mailslot, or 0 for a message of any size.
+    ULONG MailslotQuota;            // The size, in bytes, of the in-memory pool that is reserved for writes to this mailslot.
+    ULONG NextMessageSize;          // The next message size, in bytes.
+    ULONG MessagesAvailable;        // The total number of messages waiting to be read from the mailslot.
+    LARGE_INTEGER ReadTimeout;      // The time, in milliseconds, that a read operation can wait for a message to be written to the mailslot before a time-out occurs.
 } FILE_MAILSLOT_QUERY_INFORMATION, *PFILE_MAILSLOT_QUERY_INFORMATION;
 
+/**
+ * The FILE_MAILSLOT_SET_INFORMATION structure is used to set a value on a mailslot.
+ *
+ * @remarks https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_mailslot_set_information
+ */
 typedef struct _FILE_MAILSLOT_SET_INFORMATION
 {
-    PLARGE_INTEGER ReadTimeout;
+    PLARGE_INTEGER ReadTimeout;     // The time, in milliseconds, that a read operation can wait for a message to be written to the mailslot before a time-out occurs.
 } FILE_MAILSLOT_SET_INFORMATION, *PFILE_MAILSLOT_SET_INFORMATION;
 
+/**
+ * The FILE_REPARSE_POINT_INFORMATION structure contains information about a reparse point.
+ */
 typedef struct _FILE_REPARSE_POINT_INFORMATION
 {
     LONGLONG FileReference;
     ULONG Tag;
 } FILE_REPARSE_POINT_INFORMATION, *PFILE_REPARSE_POINT_INFORMATION;
 
+/**
+ * The FILE_LINK_ENTRY_INFORMATION structure contains information about a file link entry.
+ */
 typedef struct _FILE_LINK_ENTRY_INFORMATION
 {
     ULONG NextEntryOffset;
@@ -602,6 +675,9 @@ typedef struct _FILE_LINK_ENTRY_INFORMATION
     _Field_size_bytes_(FileNameLength) WCHAR FileName[1];
 } FILE_LINK_ENTRY_INFORMATION, *PFILE_LINK_ENTRY_INFORMATION;
 
+/**
+ * The FILE_LINKS_INFORMATION structure contains information about file links.
+ */
 typedef struct _FILE_LINKS_INFORMATION
 {
     ULONG BytesNeeded;
@@ -609,12 +685,18 @@ typedef struct _FILE_LINKS_INFORMATION
     FILE_LINK_ENTRY_INFORMATION Entry;
 } FILE_LINKS_INFORMATION, *PFILE_LINKS_INFORMATION;
 
+/**
+ * The FILE_NETWORK_PHYSICAL_NAME_INFORMATION structure contains information about the network physical name of a file.
+ */
 typedef struct _FILE_NETWORK_PHYSICAL_NAME_INFORMATION
 {
     ULONG FileNameLength;
     _Field_size_bytes_(FileNameLength) WCHAR FileName[1];
 } FILE_NETWORK_PHYSICAL_NAME_INFORMATION, *PFILE_NETWORK_PHYSICAL_NAME_INFORMATION;
 
+/**
+ * The FILE_STANDARD_LINK_INFORMATION structure contains standard information about a file link.
+ */
 typedef struct _FILE_STANDARD_LINK_INFORMATION
 {
     ULONG NumberOfAccessibleLinks;
@@ -676,9 +758,12 @@ typedef struct _FILE_PROCESS_IDS_USING_FILE_INFORMATION
     _Field_size_(NumberOfProcessIdsInList) ULONG_PTR ProcessIdList[1];
 } FILE_PROCESS_IDS_USING_FILE_INFORMATION, *PFILE_PROCESS_IDS_USING_FILE_INFORMATION;
 
+/**
+ * The FILE_IS_REMOTE_DEVICE_INFORMATION structure indicates whether the file system that contains the file is a remote file system.
+ */
 typedef struct _FILE_IS_REMOTE_DEVICE_INFORMATION
 {
-    BOOLEAN IsRemote;
+    BOOLEAN IsRemote; // A value that indicates whether the file system that contains the file is a remote file system.
 } FILE_IS_REMOTE_DEVICE_INFORMATION, *PFILE_IS_REMOTE_DEVICE_INFORMATION;
 
 typedef struct _FILE_NUMA_NODE_INFORMATION
@@ -718,14 +803,6 @@ typedef struct _FILE_REMOTE_PROTOCOL_INFORMATION
 
     // Protocol specific information
 
-#if (PHNT_VERSION < PHNT_WIN8)
-    struct
-    {
-        ULONG Reserved[16];
-    } ProtocolSpecificReserved;
-#endif
-
-#if (PHNT_VERSION >= PHNT_WIN8)
     union
     {
         struct
@@ -737,21 +814,14 @@ typedef struct _FILE_REMOTE_PROTOCOL_INFORMATION
             struct
             {
                 ULONG Capabilities;
-#if (PHNT_VERSION >= PHNT_21H1)
-                ULONG ShareFlags;
-#else
-                ULONG CachingFlags;
-#endif
-#if (PHNT_VERSION >= PHNT_REDSTONE5)
-                UCHAR ShareType;
+                ULONG ShareFlags; // previoulsly CachingFlags before 21H1
+                UCHAR ShareType; // RS5
                 UCHAR Reserved0[3];
                 ULONG Reserved1;
-#endif
             } Share;
         } Smb2;
         ULONG Reserved[16];
     } ProtocolSpecific;
-#endif
 } FILE_REMOTE_PROTOCOL_INFORMATION, *PFILE_REMOTE_PROTOCOL_INFORMATION;
 
 #define CHECKSUM_ENFORCEMENT_OFF 0x00000001
@@ -772,7 +842,7 @@ typedef struct _FILE_VOLUME_NAME_INFORMATION
 
 #ifndef FILE_INVALID_FILE_ID
 #define FILE_INVALID_FILE_ID ((LONGLONG)-1LL)
-#endif
+#endif // FILE_INVALID_FILE_ID
 
 #define FILE_ID_IS_INVALID(FID) ((FID).QuadPart == FILE_INVALID_FILE_ID)
 
@@ -1034,7 +1104,7 @@ typedef struct _FILE_STAT_BASIC_INFORMATION
     LARGE_INTEGER VolumeSerialNumber;
     FILE_ID_128 FileId128;
 } FILE_STAT_BASIC_INFORMATION, *PFILE_STAT_BASIC_INFORMATION;
-#endif
+#endif // NTDDI_WIN11_GE
 
 typedef struct _FILE_MEMORY_PARTITION_INFORMATION
 {
@@ -1078,7 +1148,7 @@ typedef struct _FILE_STAT_LX_INFORMATION
     ULONG LxDeviceIdMajor;
     ULONG LxDeviceIdMinor;
 } FILE_STAT_LX_INFORMATION, *PFILE_STAT_LX_INFORMATION;
-#endif
+#endif // NTDDI_WIN11_GE
 
 typedef struct _FILE_STORAGE_RESERVE_ID_INFORMATION
 {
@@ -1092,11 +1162,11 @@ typedef struct _FILE_CASE_SENSITIVE_INFORMATION
 {
     ULONG Flags;
 } FILE_CASE_SENSITIVE_INFORMATION, *PFILE_CASE_SENSITIVE_INFORMATION;
-#endif
+#endif // NTDDI_WIN11_GE
 
 typedef enum _FILE_KNOWN_FOLDER_TYPE
 {
-    KnownFolderNone,
+    KnownFolderNone = 0,
     KnownFolderDesktop,
     KnownFolderDocuments,
     KnownFolderDownloads,
@@ -1104,7 +1174,7 @@ typedef enum _FILE_KNOWN_FOLDER_TYPE
     KnownFolderPictures,
     KnownFolderVideos,
     KnownFolderOther,
-    KnownFolderMax = 7
+    KnownFolderMax
 } FILE_KNOWN_FOLDER_TYPE;
 
 typedef struct _FILE_KNOWN_FOLDER_INFORMATION
@@ -1303,7 +1373,7 @@ typedef struct _FILE_ID_GLOBAL_TX_DIR_INFORMATION
 
 typedef struct _FILE_OBJECTID_INFORMATION
 {
-    LONGLONG FileReference;
+    ULONGLONG FileReference;
     UCHAR ObjectId[16]; // GUID
     union
     {
@@ -1536,7 +1606,9 @@ typedef struct _FILE_FS_GUID_INFORMATION
     GUID FsGuid;
 } FILE_FS_GUID_INFORMATION, *PFILE_FS_GUID_INFORMATION;
 
+//
 // System calls
+//
 
 NTSYSCALLAPI
 NTSTATUS
@@ -1544,7 +1616,7 @@ NTAPI
 NtCreateFile(
     _Out_ PHANDLE FileHandle,
     _In_ ACCESS_MASK DesiredAccess,
-    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ PCOBJECT_ATTRIBUTES ObjectAttributes,
     _Out_ PIO_STATUS_BLOCK IoStatusBlock,
     _In_opt_ PLARGE_INTEGER AllocationSize,
     _In_ ULONG FileAttributes,
@@ -1560,8 +1632,8 @@ NTSTATUS
 NTAPI
 NtCreateNamedPipeFile(
     _Out_ PHANDLE FileHandle,
-    _In_ ULONG DesiredAccess,
-    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ PCOBJECT_ATTRIBUTES ObjectAttributes,
     _Out_ PIO_STATUS_BLOCK IoStatusBlock,
     _In_ ULONG ShareAccess,
     _In_ ULONG CreateDisposition,
@@ -1580,8 +1652,8 @@ NTSTATUS
 NTAPI
 NtCreateMailslotFile(
     _Out_ PHANDLE FileHandle,
-    _In_ ULONG DesiredAccess,
-    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ PCOBJECT_ATTRIBUTES ObjectAttributes,
     _Out_ PIO_STATUS_BLOCK IoStatusBlock,
     _In_ ULONG CreateOptions,
     _In_ ULONG MailslotQuota,
@@ -1595,7 +1667,7 @@ NTAPI
 NtOpenFile(
     _Out_ PHANDLE FileHandle,
     _In_ ACCESS_MASK DesiredAccess,
-    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ PCOBJECT_ATTRIBUTES ObjectAttributes,
     _Out_ PIO_STATUS_BLOCK IoStatusBlock,
     _In_ ULONG ShareAccess,
     _In_ ULONG OpenOptions
@@ -1605,7 +1677,7 @@ NTSYSCALLAPI
 NTSTATUS
 NTAPI
 NtDeleteFile(
-    _In_ POBJECT_ATTRIBUTES ObjectAttributes
+    _In_ PCOBJECT_ATTRIBUTES ObjectAttributes
     );
 
 NTSYSCALLAPI
@@ -1666,7 +1738,7 @@ NtFlushBuffersFile(
 #define FLUSH_FLAGS_FLUSH_AND_PURGE 0x00000008 // 24H2
 
 
-#if (PHNT_VERSION >= PHNT_WIN8)
+#if (PHNT_VERSION >= PHNT_WINDOWS_8)
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -1677,7 +1749,7 @@ NtFlushBuffersFileEx(
     _In_ ULONG ParametersSize,
     _Out_ PIO_STATUS_BLOCK IoStatusBlock
     );
-#endif
+#endif // PHNT_VERSION >= PHNT_WINDOWS_8
 
 NTSYSCALLAPI
 NTSTATUS
@@ -1690,18 +1762,18 @@ NtQueryInformationFile(
     _In_ FILE_INFORMATION_CLASS FileInformationClass
     );
 
-#if (PHNT_VERSION >= PHNT_REDSTONE2)
+#if (PHNT_VERSION >= PHNT_WINDOWS_10_RS2)
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
 NtQueryInformationByName(
-    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ PCOBJECT_ATTRIBUTES ObjectAttributes,
     _Out_ PIO_STATUS_BLOCK IoStatusBlock,
     _Out_writes_bytes_(Length) PVOID FileInformation,
     _In_ ULONG Length,
     _In_ FILE_INFORMATION_CLASS FileInformationClass
     );
-#endif
+#endif // PHNT_VERSION >= PHNT_WINDOWS_10_RS2
 
 NTSYSCALLAPI
 NTSTATUS
@@ -1727,20 +1799,18 @@ NtQueryDirectoryFile(
     _In_ ULONG Length,
     _In_ FILE_INFORMATION_CLASS FileInformationClass,
     _In_ BOOLEAN ReturnSingleEntry,
-    _In_opt_ PUNICODE_STRING FileName,
+    _In_opt_ PCUNICODE_STRING FileName,
     _In_ BOOLEAN RestartScan
     );
 
-#if (PHNT_VERSION >= PHNT_REDSTONE3)
 // QueryFlags values for NtQueryDirectoryFileEx
 #define FILE_QUERY_RESTART_SCAN 0x00000001
 #define FILE_QUERY_RETURN_SINGLE_ENTRY 0x00000002
 #define FILE_QUERY_INDEX_SPECIFIED 0x00000004
 #define FILE_QUERY_RETURN_ON_DISK_ENTRIES_ONLY 0x00000008
-#if (PHNT_VERSION >= PHNT_REDSTONE5)
-#define FILE_QUERY_NO_CURSOR_UPDATE 0x00000010
-#endif
+#define FILE_QUERY_NO_CURSOR_UPDATE 0x00000010 // RS5
 
+#if (PHNT_VERSION >= PHNT_WINDOWS_10_RS3)
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -1754,9 +1824,9 @@ NtQueryDirectoryFileEx(
     _In_ ULONG Length,
     _In_ FILE_INFORMATION_CLASS FileInformationClass,
     _In_ ULONG QueryFlags,
-    _In_opt_ PUNICODE_STRING FileName
+    _In_opt_ PCUNICODE_STRING FileName
     );
-#endif
+#endif // PHNT_VERSION >= PHNT_WINDOWS_10_RS3
 
 NTSYSCALLAPI
 NTSTATUS
@@ -1838,7 +1908,7 @@ NtCancelIoFile(
     _Out_ PIO_STATUS_BLOCK IoStatusBlock
     );
 
-#if (PHNT_VERSION >= PHNT_VISTA)
+#if (PHNT_VERSION >= PHNT_WINDOWS_VISTA)
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -1847,9 +1917,9 @@ NtCancelIoFileEx(
     _In_opt_ PIO_STATUS_BLOCK IoRequestToCancel,
     _Out_ PIO_STATUS_BLOCK IoStatusBlock
     );
-#endif
+#endif // PHNT_VERSION >= PHNT_WINDOWS_VISTA
 
-#if (PHNT_VERSION >= PHNT_VISTA)
+#if (PHNT_VERSION >= PHNT_WINDOWS_VISTA)
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -1858,7 +1928,7 @@ NtCancelSynchronousIoFile(
     _In_opt_ PIO_STATUS_BLOCK IoRequestToCancel,
     _Out_ PIO_STATUS_BLOCK IoStatusBlock
     );
-#endif
+#endif // PHNT_VERSION >= PHNT_WINDOWS_VISTA
 
 NTSYSCALLAPI
 NTSTATUS
@@ -1983,7 +2053,7 @@ NTSYSCALLAPI
 NTSTATUS
 NTAPI
 NtQueryAttributesFile(
-    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ PCOBJECT_ATTRIBUTES ObjectAttributes,
     _Out_ PFILE_BASIC_INFORMATION FileInformation
     );
 
@@ -1991,7 +2061,7 @@ NTSYSCALLAPI
 NTSTATUS
 NTAPI
 NtQueryFullAttributesFile(
-    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ PCOBJECT_ATTRIBUTES ObjectAttributes,
     _Out_ PFILE_NETWORK_OPEN_INFORMATION FileInformation
     );
 
@@ -2076,7 +2146,7 @@ typedef struct _FILE_NOTIFY_EXTENDED_INFORMATION
     ULONG FileNameLength;
     WCHAR FileName[1];
 } FILE_NOTIFY_EXTENDED_INFORMATION, *PFILE_NOTIFY_EXTENDED_INFORMATION;
-#endif
+#endif // NTDDI_WIN10_RS5
 
 #define FILE_NAME_FLAG_HARDLINK      0    // not part of a name pair
 #define FILE_NAME_FLAG_NTFS          0x01 // NTFS name in a name pair
@@ -2108,9 +2178,9 @@ typedef struct _FILE_NOTIFY_FULL_INFORMATION
     BYTE Reserved;
     WCHAR FileName[1];
 } FILE_NOTIFY_FULL_INFORMATION, *PFILE_NOTIFY_FULL_INFORMATION;
-#endif
+#endif // NTDDI_WIN10_NI
 
-#if (PHNT_VERSION >= PHNT_REDSTONE3)
+#if (PHNT_VERSION >= PHNT_WINDOWS_10_RS3)
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -2126,23 +2196,46 @@ NtNotifyChangeDirectoryFileEx(
     _In_ BOOLEAN WatchTree,
     _In_opt_ DIRECTORY_NOTIFY_INFORMATION_CLASS DirectoryNotifyInformationClass
     );
-#endif
+#endif // PHNT_VERSION >= PHNT_WINDOWS_10_RS3
 
+/**
+ * @brief The NtLoadDriver function loads a driver specified by the DriverServiceName parameter.
+ * @param DriverServiceName A pointer to a UNICODE_STRING structure that specifies the name of the driver service to load.
+ * @return NTSTATUS The status code returned by the function. Possible values include, but are not limited to:
+ * - STATUS_SUCCESS: The driver was successfully loaded.
+ * - STATUS_INVALID_PARAMETER: The DriverServiceName parameter is invalid.
+ * - STATUS_INSUFFICIENT_RESOURCES: There are insufficient resources to load the driver.
+ * - STATUS_OBJECT_NAME_NOT_FOUND: The specified driver service name was not found.
+ * - STATUS_OBJECT_PATH_NOT_FOUND: The path to the driver service was not found.
+ * - STATUS_OBJECT_NAME_COLLISION: A driver with the same name already exists.
+ */
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
 NtLoadDriver(
-    _In_ PUNICODE_STRING DriverServiceName
+    _In_ PCUNICODE_STRING DriverServiceName
     );
 
+/**
+ * @brief The NtUnloadDriver function unloads a driver specified by the DriverServiceName parameter.
+ * @param DriverServiceName A pointer to a UNICODE_STRING structure that specifies the name of the driver service to unload.
+ * @return NTSTATUS The status code returned by the function. Possible values include, but are not limited to:
+ * - STATUS_SUCCESS: The driver was successfully unloaded.
+ * - STATUS_INVALID_PARAMETER: The DriverServiceName parameter is invalid.
+ * - STATUS_OBJECT_NAME_NOT_FOUND: The specified driver service name was not found.
+ * - STATUS_OBJECT_PATH_NOT_FOUND: The path to the driver service was not found.
+ * - STATUS_OBJECT_NAME_COLLISION: A driver with the same name already exists.
+ */
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
 NtUnloadDriver(
-    _In_ PUNICODE_STRING DriverServiceName
+    _In_ PCUNICODE_STRING DriverServiceName
     );
 
+//
 // I/O completion port
+//
 
 #ifndef IO_COMPLETION_QUERY_STATE
 #define IO_COMPLETION_QUERY_STATE 0x0001
@@ -2172,8 +2265,8 @@ NTAPI
 NtCreateIoCompletion(
     _Out_ PHANDLE IoCompletionHandle,
     _In_ ACCESS_MASK DesiredAccess,
-    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
-    _In_opt_ ULONG Count
+    _In_opt_ PCOBJECT_ATTRIBUTES ObjectAttributes,
+    _In_opt_ ULONG NumberOfConcurrentThreads
     );
 
 NTSYSCALLAPI
@@ -2182,7 +2275,7 @@ NTAPI
 NtOpenIoCompletion(
     _Out_ PHANDLE IoCompletionHandle,
     _In_ ACCESS_MASK DesiredAccess,
-    _In_ POBJECT_ATTRIBUTES ObjectAttributes
+    _In_ PCOBJECT_ATTRIBUTES ObjectAttributes
     );
 
 NTSYSCALLAPI
@@ -2207,7 +2300,7 @@ NtSetIoCompletion(
     _In_ ULONG_PTR IoStatusInformation
     );
 
-#if (PHNT_VERSION >= PHNT_WIN7)
+#if (PHNT_VERSION >= PHNT_WINDOWS_7)
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -2232,7 +2325,15 @@ NtRemoveIoCompletion(
     _In_opt_ PLARGE_INTEGER Timeout
     );
 
-#if (PHNT_VERSION >= PHNT_VISTA)
+#if (PHNT_VERSION >= PHNT_WINDOWS_VISTA)
+// private
+typedef struct _FILE_IO_COMPLETION_INFORMATION
+{
+    PVOID KeyContext;
+    PVOID ApcContext;
+    IO_STATUS_BLOCK IoStatusBlock;
+} FILE_IO_COMPLETION_INFORMATION, *PFILE_IO_COMPLETION_INFORMATION;
+
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -2244,11 +2345,13 @@ NtRemoveIoCompletionEx(
     _In_opt_ PLARGE_INTEGER Timeout,
     _In_ BOOLEAN Alertable
     );
-#endif
+#endif // (PHNT_VERSION >= PHNT_WINDOWS_VISTA)
 
+//
 // Wait completion packet
+//
 
-#if (PHNT_VERSION >= PHNT_WIN8)
+#if (PHNT_VERSION >= PHNT_WINDOWS_8)
 
 NTSYSCALLAPI
 NTSTATUS
@@ -2256,7 +2359,7 @@ NTAPI
 NtCreateWaitCompletionPacket(
     _Out_ PHANDLE WaitCompletionPacketHandle,
     _In_ ACCESS_MASK DesiredAccess,
-    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes
+    _In_opt_ PCOBJECT_ATTRIBUTES ObjectAttributes
     );
 
 NTSYSCALLAPI
@@ -2281,71 +2384,31 @@ NtCancelWaitCompletionPacket(
     _In_ BOOLEAN RemoveSignaledPacket
     );
 
-#endif
+#endif // (PHNT_VERSION >= PHNT_WINDOWS_8)
 
-// Sessions
-
-typedef enum _IO_SESSION_EVENT
-{
-    IoSessionEventIgnore,
-    IoSessionEventCreated,
-    IoSessionEventTerminated,
-    IoSessionEventConnected,
-    IoSessionEventDisconnected,
-    IoSessionEventLogon,
-    IoSessionEventLogoff,
-    IoSessionEventMax
-} IO_SESSION_EVENT;
-
-typedef enum _IO_SESSION_STATE
-{
-    IoSessionStateCreated = 1,
-    IoSessionStateInitialized = 2,
-    IoSessionStateConnected = 3,
-    IoSessionStateDisconnected = 4,
-    IoSessionStateDisconnectedLoggedOn = 5,
-    IoSessionStateLoggedOn = 6,
-    IoSessionStateLoggedOff = 7,
-    IoSessionStateTerminated = 8,
-    IoSessionStateMax
-} IO_SESSION_STATE;
-
-// Sessions
-
-#if (PHNT_MODE != PHNT_MODE_KERNEL)
-
-#if (PHNT_VERSION >= PHNT_VISTA)
+#if (PHNT_VERSION >= PHNT_WINDOWS_11)
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
-NtOpenSession(
-    _Out_ PHANDLE SessionHandle,
-    _In_ ACCESS_MASK DesiredAccess,
-    _In_ POBJECT_ATTRIBUTES ObjectAttributes
+NtCopyFileChunk(
+    _In_ HANDLE SourceHandle,
+    _In_ HANDLE DestinationHandle,
+    _In_opt_ HANDLE EventHandle,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+    _In_ ULONG Length,
+    _In_ PLARGE_INTEGER SourceOffset,
+    _In_ PLARGE_INTEGER DestOffset,
+    _In_opt_ PULONG SourceKey,
+    _In_opt_ PULONG DestKey,
+    _In_ ULONG Flags
     );
-#endif
+#endif // (PHNT_VERSION >= PHNT_WINDOWS_11)
 
-#endif
-
-#if (PHNT_VERSION >= PHNT_WIN7)
-NTSYSCALLAPI
-NTSTATUS
-NTAPI
-NtNotifyChangeSession(
-    _In_ HANDLE SessionHandle,
-    _In_ ULONG ChangeSequenceNumber,
-    _In_ PLARGE_INTEGER ChangeTimeStamp,
-    _In_ IO_SESSION_EVENT Event,
-    _In_ IO_SESSION_STATE NewState,
-    _In_ IO_SESSION_STATE PreviousState,
-    _In_reads_bytes_opt_(PayloadSize) PVOID Payload,
-    _In_ ULONG PayloadSize
-    );
-#endif
-
+//
 // I/O Ring
+//
 
-#if (PHNT_VERSION >= PHNT_WIN11)
+#if (PHNT_VERSION >= PHNT_WINDOWS_11)
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -2384,9 +2447,11 @@ NtSetInformationIoRing(
     _In_ ULONG IoRingInformationLength,
     _In_ PVOID IoRingInformation
     );
-#endif
+#endif // (PHNT_VERSION >= PHNT_WINDOWS_11)
 
+//
 // Other types
+//
 
 typedef enum _INTERFACE_TYPE
 {
@@ -2455,11 +2520,8 @@ typedef enum _BUS_DATA_TYPE
 // Reparse structure for FSCTL_SET_REPARSE_POINT, FSCTL_GET_REPARSE_POINT, FSCTL_DELETE_REPARSE_POINT
 
 #define SYMLINK_FLAG_RELATIVE 0x00000001
-
-#if (PHNT_VERSION >= PHNT_REDSTONE4)
 #define SYMLINK_DIRECTORY 0x80000000 // If set then this is a directory symlink
 #define SYMLINK_FILE 0x40000000 // If set then this is a file symlink
-#endif
 
 typedef struct _REPARSE_DATA_BUFFER
 {
@@ -2501,7 +2563,6 @@ typedef struct _REPARSE_DATA_BUFFER
 
 #define REPARSE_DATA_BUFFER_HEADER_SIZE UFIELD_OFFSET(REPARSE_DATA_BUFFER, GenericReparseBuffer)
 
-#if (PHNT_VERSION >= PHNT_REDSTONE)
 // Reparse structure for FSCTL_SET_REPARSE_POINT_EX
 
 typedef struct _REPARSE_DATA_BUFFER_EX
@@ -2572,8 +2633,6 @@ typedef struct _REPARSE_DATA_BUFFER_EX
 
 #define REPARSE_DATA_BUFFER_EX_HEADER_SIZE \
     UFIELD_OFFSET(REPARSE_DATA_BUFFER_EX, ReparseDataBuffer.GenericReparseBuffer)
-
-#endif // PHNT_REDSTONE
 
 // Named pipe FS control definitions
 
@@ -2752,7 +2811,9 @@ typedef struct _FILE_MAILSLOT_PEEK_BUFFER
     ULONG MessageLength;
 } FILE_MAILSLOT_PEEK_BUFFER, *PFILE_MAILSLOT_PEEK_BUFFER;
 
+//
 // Mount manager FS control definitions
+//
 
 #define MOUNTMGR_DEVICE_NAME L"\\Device\\MountPointManager"
 #define MOUNTMGRCONTROLTYPE 0x0000006D // 'm'
@@ -2959,6 +3020,268 @@ typedef struct _MOUNTMGR_VOLUME_PATHS
      (s)->Length == 98 && \
      (s)->Buffer[1] == '?')
 
+//
+// Filter manager
+//
+
+#define FLT_PORT_CONNECT 0x0001
+#define FLT_PORT_ALL_ACCESS (FLT_PORT_CONNECT | STANDARD_RIGHTS_ALL)
+
+// rev
+#define FLT_SYMLINK_NAME     L"\\Global??\\FltMgr"
+#define FLT_MSG_SYMLINK_NAME L"\\Global??\\FltMgrMsg"
+#define FLT_DEVICE_NAME      L"\\FileSystem\\Filters\\FltMgr"
+#define FLT_MSG_DEVICE_NAME  L"\\FileSystem\\Filters\\FltMgrMsg"
+
+// private
+typedef struct _FLT_CONNECT_CONTEXT
+{
+    PUNICODE_STRING PortName;
+    PUNICODE_STRING64 PortName64;
+    USHORT SizeOfContext;
+    UCHAR Padding[6]; // unused
+    _Field_size_bytes_(SizeOfContext) UCHAR Context[ANYSIZE_ARRAY];
+} FLT_CONNECT_CONTEXT, *PFLT_CONNECT_CONTEXT;
+
+// rev
+#define FLT_PORT_EA_NAME "FLTPORT"
+#define FLT_PORT_CONTEXT_MAX 0xFFE8
+
+// combined FILE_FULL_EA_INFORMATION and FLT_CONNECT_CONTEXT
+typedef struct _FLT_PORT_FULL_EA
+{
+    ULONG NextEntryOffset; // 0
+    UCHAR Flags;           // 0
+    UCHAR EaNameLength;    // sizeof(FLT_PORT_EA_NAME) - sizeof(ANSI_NULL)
+    USHORT EaValueLength;  // RTL_SIZEOF_THROUGH_FIELD(FLT_CONNECT_CONTEXT, Padding) + SizeOfContext
+    CHAR EaName[8];        // FLTPORT\0
+    FLT_CONNECT_CONTEXT EaValue;
+} FLT_PORT_FULL_EA, *PFLT_PORT_FULL_EA;
+
+#define FLT_PORT_FULL_EA_SIZE \
+    (sizeof(FILE_FULL_EA_INFORMATION) + (sizeof(FLT_PORT_EA_NAME) - sizeof(ANSI_NULL)))
+#define FLT_PORT_FULL_EA_VALUE_SIZE \
+    RTL_SIZEOF_THROUGH_FIELD(FLT_CONNECT_CONTEXT, Padding)
+
+// begin_rev
+
+// IOCTLs for unlinked FltMgr handles
+#define FLT_CTL_LOAD                CTL_CODE(FILE_DEVICE_DISK_FILE_SYSTEM, 1, METHOD_BUFFERED, FILE_WRITE_ACCESS) // in: FLT_LOAD_PARAMETERS // requires SeLoadDriverPrivilege
+#define FLT_CTL_UNLOAD              CTL_CODE(FILE_DEVICE_DISK_FILE_SYSTEM, 2, METHOD_BUFFERED, FILE_WRITE_ACCESS) // in: FLT_LOAD_PARAMETERS // requires SeLoadDriverPrivilege
+#define FLT_CTL_LINK_HANDLE         CTL_CODE(FILE_DEVICE_DISK_FILE_SYSTEM, 3, METHOD_BUFFERED, FILE_READ_ACCESS)  // in: FLT_LINK // specializes the handle
+#define FLT_CTL_ATTACH              CTL_CODE(FILE_DEVICE_DISK_FILE_SYSTEM, 4, METHOD_BUFFERED, FILE_WRITE_ACCESS) // in: FLT_ATTACH
+#define FLT_CTL_DETACH              CTL_CODE(FILE_DEVICE_DISK_FILE_SYSTEM, 5, METHOD_BUFFERED, FILE_WRITE_ACCESS) // in: FLT_INSTANCE_PARAMETERS
+
+// IOCTLs for port-specific FltMgrMsg handles (opened using the extended attribute)
+#define FLT_CTL_SEND_MESSAGE        CTL_CODE(FILE_DEVICE_DISK_FILE_SYSTEM, 6, METHOD_NEITHER, FILE_WRITE_ACCESS)  // in, out: filter-specific
+#define FLT_CTL_GET_MESSAGE         CTL_CODE(FILE_DEVICE_DISK_FILE_SYSTEM, 7, METHOD_NEITHER, FILE_READ_ACCESS)   // out: filter-specific
+#define FLT_CTL_REPLY_MESSAGE       CTL_CODE(FILE_DEVICE_DISK_FILE_SYSTEM, 8, METHOD_NEITHER, FILE_WRITE_ACCESS)  // in: filter-specific
+
+// IOCTLs for linked FltMgr handles; depend on previously used FLT_LINK_TYPE
+//
+// Find first/next:
+//   FILTER                - enumerates nested instances; in: INSTANCE_INFORMATION_CLASS
+//   FILTER_VOLUME         - enumerates nested instances; in: INSTANCE_INFORMATION_CLASS
+//   FILTER_MANAGER        - enumerates all filters;      in: FILTER_INFORMATION_CLASS
+//   FILTER_MANAGER_VOLUME - enumerates all volumes;      in: FILTER_VOLUME_INFORMATION_CLASS
+//
+// Get information:
+//   FILTER                - queries filter;              in: FILTER_INFORMATION_CLASS
+//   FILTER_INSTANCE       - queries instance;            in: INSTANCE_INFORMATION_CLASS
+//
+#define FLT_CTL_FIND_FIRST          CTL_CODE(FILE_DEVICE_DISK_FILE_SYSTEM, 9, METHOD_BUFFERED, FILE_READ_ACCESS)  // in: *_INFORMATION_CLASS, out: *_INFORMATION (from fltUserStructures.h)
+#define FLT_CTL_FIND_NEXT           CTL_CODE(FILE_DEVICE_DISK_FILE_SYSTEM, 10, METHOD_BUFFERED, FILE_READ_ACCESS) // in: *_INFORMATION_CLASS, out: *_INFORMATION (from fltUserStructures.h)
+#define FLT_CTL_GET_INFORMATION     CTL_CODE(FILE_DEVICE_DISK_FILE_SYSTEM, 11, METHOD_BUFFERED, FILE_READ_ACCESS) // in: *_INFORMATION_CLASS, out: *_INFORMATION (from fltUserStructures.h)
+
+// end_rev
+
+// private
+typedef struct _FLT_LOAD_PARAMETERS
+{
+    USHORT FilterNameSize;
+    _Field_size_bytes_(FilterNameSize) WCHAR FilterName[ANYSIZE_ARRAY];
+} FLT_LOAD_PARAMETERS, *PFLT_LOAD_PARAMETERS;
+
+// private
+typedef enum _FLT_LINK_TYPE
+{
+    FILTER = 0,                // FLT_FILTER_PARAMETERS
+    FILTER_INSTANCE = 1,       // FLT_INSTANCE_PARAMETERS
+    FILTER_VOLUME = 2,         // FLT_VOLUME_PARAMETERS
+    FILTER_MANAGER = 3,        // nothing
+    FILTER_MANAGER_VOLUME = 4, // nothing
+} FLT_LINK_TYPE, *PFLT_LINK_TYPE;
+
+// private
+typedef struct _FLT_LINK
+{
+    FLT_LINK_TYPE Type;
+    ULONG ParametersOffset; // from this struct
+} FLT_LINK, *PFLT_LINK;
+
+// rev
+typedef struct _FLT_FILTER_PARAMETERS
+{
+    USHORT FilterNameSize;
+    USHORT FilterNameOffset; // to WCHAR[] from this struct
+} FLT_FILTER_PARAMETERS, *PFLT_FILTER_PARAMETERS;
+
+// private
+typedef struct _FLT_INSTANCE_PARAMETERS
+{
+    USHORT FilterNameSize;
+    USHORT FilterNameOffset; // to WCHAR[] from this struct
+    USHORT VolumeNameSize;
+    USHORT VolumeNameOffset; // to WCHAR[] from this struct
+    USHORT InstanceNameSize;
+    USHORT InstanceNameOffset; // to WCHAR[] from this struct
+} FLT_INSTANCE_PARAMETERS, *PFLT_INSTANCE_PARAMETERS;
+
+// rev
+typedef struct _FLT_VOLUME_PARAMETERS
+{
+    USHORT VolumeNameSize;
+    USHORT VolumeNameOffset; // to WCHAR[] from this struct
+} FLT_VOLUME_PARAMETERS, *PFLT_VOLUME_PARAMETERS;
+
+// private
+typedef enum _ATTACH_TYPE
+{
+    AltitudeBased = 0,
+    InstanceNameBased = 1,
+} ATTACH_TYPE, *PATTACH_TYPE;
+
+// private
+typedef struct _FLT_ATTACH
+{
+    USHORT FilterNameSize;
+    USHORT FilterNameOffset; // to WCHAR[] from this struct
+    USHORT VolumeNameSize;
+    USHORT VolumeNameOffset; // to WCHAR[] from this struct
+    ATTACH_TYPE Type;
+    USHORT InstanceNameSize;
+    USHORT InstanceNameOffset; // to WCHAR[] from this struct
+    USHORT AltitudeSize;
+    USHORT AltitudeOffset; // to WCHAR[] from this struct
+} FLT_ATTACH, *PFLT_ATTACH;
+
+//
+// Multiple UNC Provider
+//
+
+// rev // FSCTLs for \Device\Mup
+#define FSCTL_MUP_GET_UNC_CACHE_INFO                CTL_CODE(FILE_DEVICE_MULTI_UNC_PROVIDER, 11, METHOD_BUFFERED, FILE_ANY_ACCESS) // out: MUP_FSCTL_UNC_CACHE_INFORMATION
+#define FSCTL_MUP_GET_UNC_PROVIDER_LIST             CTL_CODE(FILE_DEVICE_MULTI_UNC_PROVIDER, 12, METHOD_BUFFERED, FILE_ANY_ACCESS) // out: MUP_FSCTL_UNC_PROVIDER_INFORMATION
+#define FSCTL_MUP_GET_SURROGATE_PROVIDER_LIST       CTL_CODE(FILE_DEVICE_MULTI_UNC_PROVIDER, 13, METHOD_BUFFERED, FILE_ANY_ACCESS) // out: MUP_FSCTL_SURROGATE_PROVIDER_INFORMATION
+#define FSCTL_MUP_GET_UNC_HARDENING_CONFIGURATION   CTL_CODE(FILE_DEVICE_MULTI_UNC_PROVIDER, 14, METHOD_BUFFERED, FILE_ANY_ACCESS) // out: MUP_FSCTL_UNC_HARDENING_PREFIX_TABLE_ENTRY[]
+#define FSCTL_MUP_GET_UNC_HARDENING_CONFIGURATION_FOR_PATH  CTL_CODE(FILE_DEVICE_MULTI_UNC_PROVIDER, 15, METHOD_BUFFERED, FILE_ANY_ACCESS) // in: MUP_FSCTL_QUERY_UNC_HARDENING_CONFIGURATION_IN; out: MUP_FSCTL_QUERY_UNC_HARDENING_CONFIGURATION_OUT
+
+// private
+typedef struct _MUP_FSCTL_UNC_CACHE_ENTRY
+{
+    ULONG TotalLength;
+    ULONG UncNameOffset; // to WCHAR[] from this struct
+    USHORT UncNameLength; // in bytes
+    ULONG ProviderNameOffset; // to WCHAR[] from this struct
+    USHORT ProviderNameLength; // in bytes
+    ULONG SurrogateNameOffset; // to WCHAR[] from this struct
+    USHORT SurrogateNameLength; // in bytes
+    ULONG ProviderPriority;
+    ULONG EntryTtl;
+    WCHAR Strings[ANYSIZE_ARRAY];
+} MUP_FSCTL_UNC_CACHE_ENTRY, *PMUP_FSCTL_UNC_CACHE_ENTRY;
+
+// private
+typedef struct _MUP_FSCTL_UNC_CACHE_INFORMATION
+{
+    ULONG MaxCacheSize;
+    ULONG CurrentCacheSize;
+    ULONG EntryTimeout;
+    ULONG TotalEntries;
+    MUP_FSCTL_UNC_CACHE_ENTRY CacheEntry[ANYSIZE_ARRAY];
+} MUP_FSCTL_UNC_CACHE_INFORMATION, *PMUP_FSCTL_UNC_CACHE_INFORMATION;
+
+// private
+typedef struct _MUP_FSCTL_UNC_PROVIDER_ENTRY
+{
+    ULONG TotalLength;
+    LONG ReferenceCount;
+    ULONG ProviderPriority;
+    ULONG ProviderState;
+    ULONG ProviderId;
+    USHORT ProviderNameLength; // in bytes
+    WCHAR ProviderName[ANYSIZE_ARRAY];
+} MUP_FSCTL_UNC_PROVIDER_ENTRY, *PMUP_FSCTL_UNC_PROVIDER_ENTRY;
+
+// private
+typedef struct _MUP_FSCTL_UNC_PROVIDER_INFORMATION
+{
+    ULONG TotalEntries;
+    MUP_FSCTL_UNC_PROVIDER_ENTRY ProviderEntry[ANYSIZE_ARRAY];
+} MUP_FSCTL_UNC_PROVIDER_INFORMATION, *PMUP_FSCTL_UNC_PROVIDER_INFORMATION;
+
+// private
+typedef struct _MUP_FSCTL_SURROGATE_PROVIDER_ENTRY
+{
+    ULONG TotalLength;
+    LONG ReferenceCount;
+    ULONG SurrogateType;
+    ULONG SurrogateState;
+    ULONG SurrogatePriority;
+    USHORT SurrogateNameLength; // in bytes
+    WCHAR SurrogateName[ANYSIZE_ARRAY];
+} MUP_FSCTL_SURROGATE_PROVIDER_ENTRY, *PMUP_FSCTL_SURROGATE_PROVIDER_ENTRY;
+
+// private
+typedef struct _MUP_FSCTL_SURROGATE_PROVIDER_INFORMATION
+{
+    ULONG TotalEntries;
+    MUP_FSCTL_SURROGATE_PROVIDER_ENTRY SurrogateEntry[ANYSIZE_ARRAY];
+} MUP_FSCTL_SURROGATE_PROVIDER_INFORMATION, *PMUP_FSCTL_SURROGATE_PROVIDER_INFORMATION;
+
+// private
+typedef struct _MUP_FSCTL_UNC_HARDENING_PREFIX_TABLE_ENTRY
+{
+    ULONG NextOffset; // from this struct
+    ULONG PrefixNameOffset; // to WCHAR[] from this struct
+    USHORT PrefixNameCbLength; // in bytes
+    union
+    {
+        ULONG RequiredHardeningCapabilities;
+        struct
+        {
+            ULONG RequiresMutualAuth : 1;
+            ULONG RequiresIntegrity : 1;
+            ULONG RequiresPrivacy : 1;
+        };
+    };
+    ULONGLONG OpenCount;
+} MUP_FSCTL_UNC_HARDENING_PREFIX_TABLE_ENTRY, *PMUP_FSCTL_UNC_HARDENING_PREFIX_TABLE_ENTRY;
+
+// private
+typedef struct _MUP_FSCTL_QUERY_UNC_HARDENING_CONFIGURATION_IN
+{
+    ULONG Size;
+    ULONG UncPathOffset; // to WCHAR[] from this struct
+    USHORT UncPathCbLength; // in bytes
+} MUP_FSCTL_QUERY_UNC_HARDENING_CONFIGURATION_IN, *PMUP_FSCTL_QUERY_UNC_HARDENING_CONFIGURATION_IN;
+
+// private
+typedef struct _MUP_FSCTL_QUERY_UNC_HARDENING_CONFIGURATION_OUT
+{
+    ULONG Size;
+    union
+    {
+        ULONG RequiredHardeningCapabilities;
+        struct
+        {
+            ULONG RequiresMutualAuth : 1;
+            ULONG RequiresIntegrity : 1;
+            ULONG RequiresPrivacy : 1;
+        };
+    };
+} MUP_FSCTL_QUERY_UNC_HARDENING_CONFIGURATION_OUT, *PMUP_FSCTL_QUERY_UNC_HARDENING_CONFIGURATION_OUT;
+
 #if (PHNT_MODE != PHNT_MODE_KERNEL)
 
 //
@@ -3039,9 +3362,8 @@ typedef struct _MOUNTMGR_VOLUME_PATHS
 #define IRP_MN_QUERY_BUS_INFORMATION        0x15
 #define IRP_MN_DEVICE_USAGE_NOTIFICATION    0x16
 #define IRP_MN_SURPRISE_REMOVAL             0x17
-#if (PHNT_VERSION >= PHNT_WIN7)
 #define IRP_MN_DEVICE_ENUMERATED            0x19
-#endif
+
 // POWER minor function codes
 #define IRP_MN_WAIT_WAKE                    0x00
 #define IRP_MN_POWER_SEQUENCE               0x01
@@ -3269,18 +3591,12 @@ typedef struct _MAILSLOT_CREATE_PARAMETERS
     BOOLEAN TimeoutSpecified;
 } MAILSLOT_CREATE_PARAMETERS, *PMAILSLOT_CREATE_PARAMETERS;
 
-#if (PHNT_VERSION >= PHNT_WIN7)
-
 // pub
 typedef struct _OPLOCK_KEY_ECP_CONTEXT
 {
     GUID OplockKey;
     ULONG Reserved;
 } OPLOCK_KEY_ECP_CONTEXT, *POPLOCK_KEY_ECP_CONTEXT;
-
-#endif
-
-#if (PHNT_VERSION >= PHNT_WIN8)
 
 // pub
 typedef struct _OPLOCK_KEY_CONTEXT
@@ -3298,47 +3614,26 @@ typedef struct _OPLOCK_KEY_CONTEXT
 #define OPLOCK_KEY_FLAG_PARENT_KEY 0x0001
 #define OPLOCK_KEY_FLAG_TARGET_KEY 0x0002
 
-#endif
-
-#if (PHNT_VERSION >= PHNT_WIN8)
-
 // pub
 #define SUPPORTED_FS_FEATURES_OFFLOAD_READ    0x00000001
 #define SUPPORTED_FS_FEATURES_OFFLOAD_WRITE   0x00000002
-
-#if (PHNT_VERSION >= PHNT_REDSTONE2)
-
-// pub
 #define SUPPORTED_FS_FEATURES_QUERY_OPEN      0x00000004
-
-#if (PHNT_VERSION >= PHNT_WIN11)
-
-// pub
 #define SUPPORTED_FS_FEATURES_BYPASS_IO       0x00000008
 
-// pub
-#define SUPPORTED_FS_FEATURES_VALID_MASK      (SUPPORTED_FS_FEATURES_OFFLOAD_READ |\
-                                               SUPPORTED_FS_FEATURES_OFFLOAD_WRITE |\
-                                               SUPPORTED_FS_FEATURES_QUERY_OPEN |\
+// WIN11
+#define SUPPORTED_FS_FEATURES_VALID_MASK_V3 (SUPPORTED_FS_FEATURES_OFFLOAD_READ | \
+                                               SUPPORTED_FS_FEATURES_OFFLOAD_WRITE | \
+                                               SUPPORTED_FS_FEATURES_QUERY_OPEN | \
                                                SUPPORTED_FS_FEATURES_BYPASS_IO)
-
-#else // (PHNT_VERSION >= PHNT_WIN11)
-
-// pub
-#define SUPPORTED_FS_FEATURES_VALID_MASK      (SUPPORTED_FS_FEATURES_OFFLOAD_READ |\
-                                               SUPPORTED_FS_FEATURES_OFFLOAD_WRITE |\
+// WIN10-RS2
+#define SUPPORTED_FS_FEATURES_VALID_MASK_V2 (SUPPORTED_FS_FEATURES_OFFLOAD_READ | \
+                                               SUPPORTED_FS_FEATURES_OFFLOAD_WRITE | \
                                                SUPPORTED_FS_FEATURES_QUERY_OPEN)
-
-#endif // (PHNT_VERSION >= PHNT_WIN11)
-
-#else // (PHNT_VERSION >= PHNT_REDSTONE2)
-
-// pub
-#define SUPPORTED_FS_FEATURES_VALID_MASK      (SUPPORTED_FS_FEATURES_OFFLOAD_READ |\
+// WIN8
+#define SUPPORTED_FS_FEATURES_VALID_MASK_V1 (SUPPORTED_FS_FEATURES_OFFLOAD_READ | \
                                                SUPPORTED_FS_FEATURES_OFFLOAD_WRITE)
 
-#endif // (PHNT_VERSION >= PHNT_REDSTONE2)
-#endif // (PHNT_VERSION >= PHNT_WIN8)
+#define SUPPORTED_FS_FEATURES_VALID_MASK SUPPORTED_FS_FEATURES_VALID_MASK_V3
 
 #endif // (PHNT_MODE != PHNT_MODE_KERNEL)
 
