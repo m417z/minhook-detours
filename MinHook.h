@@ -82,19 +82,12 @@ typedef enum MH_STATUS
 } MH_STATUS;
 
 // The method of suspending and resuming threads.
-//
-// It's possible to add an additional method using PssCaptureSnapshot.
-// Pros: Documented, fast.
-// Cons: Available from Windows 8.1, less reliable.
 typedef enum MH_THREAD_FREEZE_METHOD
 {
-    // The original MinHook method, using CreateToolhelp32Snapshot. Documented
-    // and supported on all Windows versions, but very slow and less reliable.
+    // The default Detours method.
     MH_FREEZE_METHOD_ORIGINAL = 0,
 
-    // A much faster and more reliable, but undocumented method, using
-    // NtGetNextThread. Supported since Windows Vista, on older versions falls
-    // back to MH_ORIGINAL.
+    // Currently same as MH_FREEZE_METHOD_ORIGINAL.
     MH_FREEZE_METHOD_FAST_UNDOCUMENTED,
 
     // Threads are not suspended and instruction pointer registers are not
