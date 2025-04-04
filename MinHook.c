@@ -457,8 +457,6 @@ MH_STATUS WINAPI MH_Initialize(VOID)
 
     InitializeCriticalSection(&g_criticalSection);
 
-    // TODO: Create private heap (Detours)
-
     g_initialized = TRUE;
     return MH_OK;
 }
@@ -482,7 +480,7 @@ MH_STATUS WINAPI MH_Uninitialize(VOID)
         return status;
     }
 
-    // TODO: Destroy private heap (Detours)
+    SlimDetoursUninitialize();
 
     HeapFree(GetProcessHeap(), 0, g_hooks.pItems);
 
