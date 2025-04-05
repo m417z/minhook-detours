@@ -7,7 +7,8 @@
 #include "SlimDetours.inl"
 
 #define THREAD_ACCESS (THREAD_QUERY_LIMITED_INFORMATION | THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT)
-#define INITIAL_THREAD_CAPACITY 128
+
+static HANDLE s_Handles[32];
 
 NTSTATUS
 detour_thread_suspend(
@@ -15,16 +16,17 @@ detour_thread_suspend(
     _Out_ PULONG SuspendedHandleCount)
 {
     NTSTATUS Status;
-    PHANDLE Buffer = NULL;
-    ULONG BufferCapacity = 0;
+    PHANDLE Buffer = s_Handles;
+    ULONG BufferCapacity = ARRAYSIZE(s_Handles);
     ULONG SuspendedCount = 0;
+    BOOL CurrentThreadSkipped = FALSE;
     HANDLE CurrentTID = (HANDLE)(ULONG_PTR)NtCurrentThreadId();
     BOOL ClosePrevThread = FALSE;
     HANDLE ThreadHandle = NULL;
     while (TRUE)
     {
-        HANDLE hNextThread;
-        Status = NtGetNextThread(NtCurrentProcess(), ThreadHandle, THREAD_ACCESS, 0, 0, &hNextThread);
+        HANDLE NextThreadHandle;
+        Status = NtGetNextThread(NtCurrentProcess(), ThreadHandle, THREAD_ACCESS, 0, 0, &NextThreadHandle);
         if (ClosePrevThread)
         {
             NtClose(ThreadHandle);
@@ -39,25 +41,29 @@ detour_thread_suspend(
             break;
         }
 
-        ThreadHandle = hNextThread;
+        ThreadHandle = NextThreadHandle;
         ClosePrevThread = TRUE;
 
-        THREAD_BASIC_INFORMATION BasicInformation;
-        if (!NT_SUCCESS(NtQueryInformationThread(
-            ThreadHandle,
-            ThreadBasicInformation,
-            &BasicInformation,
-            sizeof(BasicInformation),
-            NULL
-        )))
+        if (!CurrentThreadSkipped)
         {
-            continue;
-        }
+            THREAD_BASIC_INFORMATION BasicInformation;
+            if (!NT_SUCCESS(NtQueryInformationThread(
+                ThreadHandle,
+                ThreadBasicInformation,
+                &BasicInformation,
+                sizeof(BasicInformation),
+                NULL
+            )))
+            {
+                continue;
+            }
 
-        /* Skip the current thread */
-        if (BasicInformation.ClientId.UniqueThread == CurrentTID)
-        {
-            continue;
+            /* Skip the current thread */
+            if (BasicInformation.ClientId.UniqueThread == CurrentTID)
+            {
+                CurrentThreadSkipped = TRUE;
+                continue;
+            }
         }
 
         if (!NT_SUCCESS(NtSuspendThread(ThreadHandle, NULL)))
@@ -68,18 +74,19 @@ detour_thread_suspend(
         ClosePrevThread = FALSE;
 
         Status = STATUS_SUCCESS;
-        if (Buffer == NULL)
-        {
-            BufferCapacity = INITIAL_THREAD_CAPACITY;
-            Buffer = (PHANDLE)detour_memory_alloc(BufferCapacity * sizeof(HANDLE));
-            if (Buffer == NULL)
-            {
-                Status = STATUS_NO_MEMORY;
-            }
-        } else if (SuspendedCount >= BufferCapacity)
+        if (SuspendedCount >= BufferCapacity)
         {
             BufferCapacity *= 2;
-            LPHANDLE p = (PHANDLE)detour_memory_realloc(Buffer, BufferCapacity * sizeof(HANDLE));
+
+            PHANDLE p;
+            if (Buffer == s_Handles)
+            {
+                p = (PHANDLE)detour_memory_alloc(BufferCapacity * sizeof(HANDLE));
+            } else
+            {
+                p = (PHANDLE)detour_memory_realloc(Buffer, BufferCapacity * sizeof(HANDLE));
+            }
+
             if (p)
             {
                 Buffer = p;
@@ -106,7 +113,7 @@ detour_thread_suspend(
         Buffer[SuspendedCount++] = ThreadHandle;
     }
 
-    if (!NT_SUCCESS(Status) && Buffer != NULL)
+    if (!NT_SUCCESS(Status))
     {
         for (UINT i = 0; i < SuspendedCount; ++i)
         {
@@ -114,9 +121,12 @@ detour_thread_suspend(
             NtClose(Buffer[i]);
         }
 
-        detour_memory_free(Buffer);
-        Buffer = NULL;
+        if (Buffer != s_Handles)
+        {
+            detour_memory_free(Buffer);
+        }
 
+        Buffer = NULL;
         SuspendedCount = 0;
     }
 
@@ -138,7 +148,11 @@ detour_thread_resume(
         NtResumeThread(SuspendedHandles[i], NULL);
         NtClose(SuspendedHandles[i]);
     }
-    detour_memory_free(SuspendedHandles);
+
+    if (SuspendedHandles != s_Handles)
+    {
+        detour_memory_free(SuspendedHandles);
+    }
 }
 
 NTSTATUS
