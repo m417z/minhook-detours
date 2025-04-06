@@ -96,7 +96,7 @@ typedef enum MH_THREAD_FREEZE_METHOD
     MH_FREEZE_METHOD_NONE_UNSAFE
 } MH_THREAD_FREEZE_METHOD;
 
-typedef void(WINAPI *MH_ERROR_CALLBACK)(LPVOID pTarget, NTSTATUS detoursStatus);
+typedef void(WINAPI *MH_ERROR_CALLBACK)(LPVOID pTarget, HRESULT detoursResult);
 
 // Can be passed as a parameter to MH_EnableHook, MH_DisableHook,
 // MH_QueueEnableHook or MH_QueueDisableHook.
