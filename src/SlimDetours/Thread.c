@@ -23,6 +23,7 @@ detour_thread_suspend(
     HANDLE CurrentTID = (HANDLE)(ULONG_PTR)NtCurrentThreadId();
     BOOL ClosePrevThread = FALSE;
     HANDLE ThreadHandle = NULL;
+
     while (TRUE)
     {
         HANDLE NextThreadHandle;
@@ -44,21 +45,18 @@ detour_thread_suspend(
         ThreadHandle = NextThreadHandle;
         ClosePrevThread = TRUE;
 
+        /* Skip the current thread */
         if (!CurrentThreadSkipped)
         {
             THREAD_BASIC_INFORMATION BasicInformation;
-            if (!NT_SUCCESS(NtQueryInformationThread(
-                ThreadHandle,
-                ThreadBasicInformation,
-                &BasicInformation,
-                sizeof(BasicInformation),
-                NULL
-            )))
+            if (!NT_SUCCESS(NtQueryInformationThread(ThreadHandle,
+                                                     ThreadBasicInformation,
+                                                     &BasicInformation,
+                                                     sizeof(BasicInformation),
+                                                     NULL)))
             {
                 continue;
             }
-
-            /* Skip the current thread */
             if (BasicInformation.ClientId.UniqueThread == CurrentTID)
             {
                 CurrentThreadSkipped = TRUE;
@@ -82,6 +80,10 @@ detour_thread_suspend(
             if (Buffer == s_Handles)
             {
                 p = (PHANDLE)detour_memory_alloc(BufferCapacity * sizeof(HANDLE));
+                if (p)
+                {
+                    RtlCopyMemory(p, Buffer, SuspendedCount * sizeof(HANDLE));
+                }
             } else
             {
                 p = (PHANDLE)detour_memory_realloc(Buffer, BufferCapacity * sizeof(HANDLE));
@@ -186,7 +188,7 @@ detour_thread_update(
     bUpdateContext = FALSE;
     for (o = PendingOperations; o != NULL && !bUpdateContext; o = o->pNext)
     {
-        if (o->fIsRemove)
+        if (o->dwOperation == DETOUR_OPERATION_REMOVE)
         {
             if (cxt.CONTEXT_PC >= (ULONG_PTR)o->pTrampoline->rbCode &&
                 cxt.CONTEXT_PC < ((ULONG_PTR)o->pTrampoline->rbCode + RTL_FIELD_SIZE(DETOUR_TRAMPOLINE, rbCode)))
@@ -202,7 +204,7 @@ detour_thread_update(
                 bUpdateContext = TRUE;
             }
 #endif
-        } else if (o->fIsAdd)
+        } else if (o->dwOperation == DETOUR_OPERATION_ADD)
         {
             if (cxt.CONTEXT_PC >= (ULONG_PTR)o->pbTarget &&
                 cxt.CONTEXT_PC < ((ULONG_PTR)o->pbTarget + o->pTrampoline->cbRestore))

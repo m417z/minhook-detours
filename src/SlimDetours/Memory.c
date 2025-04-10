@@ -141,14 +141,16 @@ detour_memory_free(
     return RtlFreeHeap(_detour_memory_heap, 0, BaseAddress);
 }
 
-VOID
+BOOL
 detour_memory_uninitialize(VOID)
 {
-    if (_detour_memory_heap != NULL)
+    if (_detour_memory_heap != NULL && _detour_memory_heap != NtGetProcessHeap())
     {
-        RtlDestroyHeap(_detour_memory_heap);
-        _detour_memory_heap = NULL;
+        _detour_memory_heap = RtlDestroyHeap(_detour_memory_heap);
+        return _detour_memory_heap == NULL;
     }
+
+    return TRUE;
 }
 
 BOOL

@@ -27,13 +27,8 @@ extern "C" {
 #define DETOUR_INSTRUCTION_TARGET_NONE ((PVOID)0)
 #define DETOUR_INSTRUCTION_TARGET_DYNAMIC ((PVOID)(LONG_PTR)-1)
 
-HRESULT
-NTAPI
-SlimDetoursTransactionBegin(VOID);
-
 typedef struct _DETOUR_TRANSACTION_OPTIONS
 {
-    ULONG cbSize;
     BOOL fSuspendThreads;
 } DETOUR_TRANSACTION_OPTIONS, *PDETOUR_TRANSACTION_OPTIONS;
 
@@ -43,6 +38,15 @@ HRESULT
 NTAPI
 SlimDetoursTransactionBeginEx(
     _In_ PCDETOUR_TRANSACTION_OPTIONS pOptions);
+
+FORCEINLINE
+HRESULT
+SlimDetoursTransactionBegin(VOID)
+{
+    DETOUR_TRANSACTION_OPTIONS Options;
+    Options.fSuspendThreads = TRUE;
+    return SlimDetoursTransactionBeginEx(&Options);
+}
 
 HRESULT
 NTAPI
@@ -58,11 +62,35 @@ SlimDetoursAttach(
     _Inout_ PVOID* ppPointer,
     _In_ PVOID pDetour);
 
+typedef struct _DETOUR_DETACH_OPTIONS
+{
+    PVOID *ppTrampolineToFreeManually;
+} DETOUR_DETACH_OPTIONS, *PDETOUR_DETACH_OPTIONS;
+
+typedef const DETOUR_DETACH_OPTIONS* PCDETOUR_DETACH_OPTIONS;
+
 HRESULT
 NTAPI
+SlimDetoursDetachEx(
+    _Inout_ PVOID* ppPointer,
+    _In_ PVOID pDetour,
+    _In_ PCDETOUR_DETACH_OPTIONS pOptions);
+
+FORCEINLINE
+HRESULT
 SlimDetoursDetach(
     _Inout_ PVOID* ppPointer,
-    _In_ PVOID pDetour);
+    _In_ PVOID pDetour)
+{
+    DETOUR_DETACH_OPTIONS Options;
+    Options.ppTrampolineToFreeManually = NULL;
+    return SlimDetoursDetachEx(ppPointer, pDetour, &Options);
+}
+
+HRESULT
+NTAPI
+SlimDetoursFreeTrampoline(
+    _In_ PVOID pTrampoline);
 
 PVOID
 NTAPI

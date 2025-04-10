@@ -206,7 +206,6 @@ static MH_STATUS EnableHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL enable)
         if (pos != INVALID_HOOK_POS)
         {
             DETOUR_TRANSACTION_OPTIONS options = {
-                sizeof(options),
                 g_threadFreezeMethod != MH_FREEZE_METHOD_NONE_UNSAFE
             };
             hr = SlimDetoursTransactionBeginEx(&options);
@@ -286,7 +285,6 @@ static MH_STATUS EnableHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL enable)
             if (pHook->isEnabled != enable)
             {
                 DETOUR_TRANSACTION_OPTIONS options = {
-                    sizeof(options),
                     g_threadFreezeMethod != MH_FREEZE_METHOD_NONE_UNSAFE
                 };
                 hr = SlimDetoursTransactionBeginEx(&options);
@@ -389,7 +387,6 @@ static MH_STATUS ApplyQueued(ULONG_PTR hookIdent)
     if (pos != INVALID_HOOK_POS)
     {
         DETOUR_TRANSACTION_OPTIONS options = {
-            sizeof(options),
             g_threadFreezeMethod != MH_FREEZE_METHOD_NONE_UNSAFE
         };
         hr = SlimDetoursTransactionBeginEx(&options);
