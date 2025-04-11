@@ -19,6 +19,7 @@ typedef struct _HOOK_ENTRY
     LPVOID pDetour;
     LPVOID pTargetOrTrampoline;
     LPVOID *ppOriginal;
+    LPVOID pTrampolineToFree;
     UINT8 isEnabled : 1;
     UINT8 queueEnable : 1;
     HRESULT bulkLastError;
@@ -145,6 +146,37 @@ static BOOL IsExecutableAddress(LPVOID pAddress)
     return (mi.State == MEM_COMMIT && (mi.Protect & PAGE_EXECUTE_FLAGS));
 }
 
+static void FreeHookTrampolineIfNeeded(PHOOK_ENTRY pHook)
+{
+    if (pHook->pTrampolineToFree)
+    {
+        SlimDetoursFreeTrampoline(pHook->pTrampolineToFree);
+        pHook->pTrampolineToFree = NULL;
+    }
+}
+
+static HRESULT MHDetoursTransactionBegin()
+{
+    DETOUR_TRANSACTION_OPTIONS options = {
+        .fSuspendThreads = g_threadFreezeMethod != MH_FREEZE_METHOD_NONE_UNSAFE,
+    };
+    return SlimDetoursTransactionBeginEx(&options);
+}
+
+static HRESULT MHDetoursAttach(PHOOK_ENTRY pHook)
+{
+    FreeHookTrampolineIfNeeded(pHook);
+    return SlimDetoursAttach(pHook->ppOriginal, pHook->pDetour);
+}
+
+static HRESULT MHDetoursDetach(PHOOK_ENTRY pHook)
+{
+    DETOUR_DETACH_OPTIONS options = {
+        .ppTrampolineToFreeManually = &pHook->pTrampolineToFree,
+    };
+    return SlimDetoursDetachEx(pHook->ppOriginal, pHook->pDetour, &options);
+}
+
 static MH_STATUS CreateHook(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDetour, LPVOID *ppOriginal)
 {
     MH_STATUS status = MH_OK;
@@ -182,6 +214,7 @@ static MH_STATUS CreateHook(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDetour,
                 pHook->ppOriginal = &pHook->pTargetOrTrampoline;
             }
 
+            pHook->pTrampolineToFree = NULL;
             pHook->isEnabled = FALSE;
             pHook->queueEnable = FALSE;
             pHook->bulkLastError = S_OK;
@@ -205,10 +238,7 @@ static MH_STATUS EnableHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL enable)
         UINT pos = FindHookEntryEnabled(hookIdent, pTarget, 0, !enable);
         if (pos != INVALID_HOOK_POS)
         {
-            DETOUR_TRANSACTION_OPTIONS options = {
-                g_threadFreezeMethod != MH_FREEZE_METHOD_NONE_UNSAFE
-            };
-            hr = SlimDetoursTransactionBeginEx(&options);
+            hr = MHDetoursTransactionBegin();
             if (SUCCEEDED(hr))
             {
                 do
@@ -217,11 +247,11 @@ static MH_STATUS EnableHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL enable)
 
                     if (enable)
                     {
-                        hr = SlimDetoursAttach(pHook->ppOriginal, pHook->pDetour);
+                        hr = MHDetoursAttach(pHook);
                     }
                     else
                     {
-                        hr = SlimDetoursDetach(pHook->ppOriginal, pHook->pDetour);
+                        hr = MHDetoursDetach(pHook);
                     }
 
                     pHook->bulkLastError = hr;
@@ -284,19 +314,16 @@ static MH_STATUS EnableHook(ULONG_PTR hookIdent, LPVOID pTarget, BOOL enable)
             PHOOK_ENTRY pHook = &g_hooks.pItems[pos];
             if (pHook->isEnabled != enable)
             {
-                DETOUR_TRANSACTION_OPTIONS options = {
-                    g_threadFreezeMethod != MH_FREEZE_METHOD_NONE_UNSAFE
-                };
-                hr = SlimDetoursTransactionBeginEx(&options);
+                hr = MHDetoursTransactionBegin();
                 if (SUCCEEDED(hr))
                 {
                     if (enable)
                     {
-                        hr = SlimDetoursAttach(pHook->ppOriginal, pHook->pDetour);
+                        hr = MHDetoursAttach(pHook);
                     }
                     else
                     {
-                        hr = SlimDetoursDetach(pHook->ppOriginal, pHook->pDetour);
+                        hr = MHDetoursDetach(pHook);
                     }
 
                     if (SUCCEEDED(hr))
@@ -342,6 +369,7 @@ static void RemoveDisabledHooks(ULONG_PTR hookIdent, LPVOID pTarget)
     UINT pos = FindHookEntryEnabled(hookIdent, pTarget, 0, FALSE);
     while (pos != INVALID_HOOK_POS)
     {
+        FreeHookTrampolineIfNeeded(&g_hooks.pItems[pos]);
         DeleteHookEntry(pos);
         pos = FindHookEntryEnabled(hookIdent, pTarget, pos, FALSE);
     }
@@ -386,10 +414,7 @@ static MH_STATUS ApplyQueued(ULONG_PTR hookIdent)
     UINT pos = FindHookEntryQueued(hookIdent, MH_ALL_HOOKS, 0);
     if (pos != INVALID_HOOK_POS)
     {
-        DETOUR_TRANSACTION_OPTIONS options = {
-            g_threadFreezeMethod != MH_FREEZE_METHOD_NONE_UNSAFE
-        };
-        hr = SlimDetoursTransactionBeginEx(&options);
+        hr = MHDetoursTransactionBegin();
         if (SUCCEEDED(hr))
         {
             do
@@ -398,11 +423,11 @@ static MH_STATUS ApplyQueued(ULONG_PTR hookIdent)
 
                 if (pHook->queueEnable)
                 {
-                    hr = SlimDetoursAttach(pHook->ppOriginal, pHook->pDetour);
+                    hr = MHDetoursAttach(pHook);
                 }
                 else
                 {
-                    hr = SlimDetoursDetach(pHook->ppOriginal, pHook->pDetour);
+                    hr = MHDetoursDetach(pHook);
                 }
 
                 pHook->bulkLastError = hr;
