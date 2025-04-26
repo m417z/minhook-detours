@@ -204,6 +204,28 @@ static MH_STATUS CreateHook(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDetour,
 
             if (ppOriginal)
             {
+                // Check if the ppOriginal pointer was already specified for
+                // other hooks. If so, modify them to use pTargetOrTrampoline.
+                // This fixes a problem with the following questionable code:
+                //
+                // MH_CreateHook(pTarget1, pDetour, &ppOriginal);
+                // // ...
+                // MH_CreateHook(pTarget2, pDetour, &ppOriginal);
+                //
+                // While it's unsupported to have the same ppOriginal pointer
+                // specified more than once, it worked in MinHook, and some
+                // Windhawk mods which call HandleLoadedExplorerPatcher rely on
+                // it.
+                for (UINT i = 0; i < g_hooks.size - 1; ++i)
+                {
+                    PHOOK_ENTRY pHookIter = &g_hooks.pItems[i];
+                    if (pHookIter->ppOriginal == ppOriginal)
+                    {
+                        pHookIter->pTargetOrTrampoline = *pHookIter->ppOriginal;
+                        pHookIter->ppOriginal = &pHookIter->pTargetOrTrampoline;
+                    }
+                }
+
                 pHook->pTargetOrTrampoline = NULL;
                 pHook->ppOriginal = ppOriginal;
                 *ppOriginal = pTarget;
