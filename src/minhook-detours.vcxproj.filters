@@ -24,9 +24,6 @@
     <ClCompile Include="SlimDetours\Disassembler.c">
       <Filter>Source Files\SlimDetours</Filter>
     </ClCompile>
-    <ClCompile Include="SlimDetours\FuncTableHook.c">
-      <Filter>Source Files\SlimDetours</Filter>
-    </ClCompile>
     <ClCompile Include="SlimDetours\InlineHook.c">
       <Filter>Source Files\SlimDetours</Filter>
     </ClCompile>
@@ -50,9 +47,6 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <None Include="SlimDetours\Utils.inl">
-      <Filter>Header Files\SlimDetours</Filter>
-    </None>
     <None Include="SlimDetours\SlimDetours.inl">
       <Filter>Header Files\SlimDetours</Filter>
     </None>

@@ -230,7 +230,6 @@
   <ItemGroup>
     <ClCompile Include="MinHook.c" />
     <ClCompile Include="SlimDetours\Disassembler.c" />
-    <ClCompile Include="SlimDetours\FuncTableHook.c" />
     <ClCompile Include="SlimDetours\InlineHook.c" />
     <ClCompile Include="SlimDetours\Instruction.c" />
     <ClCompile Include="SlimDetours\Memory.c" />
@@ -246,7 +245,6 @@
   <ItemGroup>
     <None Include="SlimDetours\SlimDetours.inl" />
     <None Include="SlimDetours\SlimDetours.NDK.inl" />
-    <None Include="SlimDetours\Utils.inl" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="minhook-detours.rc" />
