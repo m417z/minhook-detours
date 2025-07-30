@@ -138,6 +138,11 @@ extern "C" {
     //   ppOriginal  [out] A pointer to the trampoline function, which will be
     //                     used to call the original target function.
     //                     This parameter can be NULL.
+    //                     If not NULL, the pointer must be valid until the hook
+    //                     is removed, since its value is updated when the hook
+    //                     is enabled or disabled. Also, for that reason, the
+    //                     pointer (and not its copy) must be used to call the
+    //                     original target function.
     MH_STATUS WINAPI MH_CreateHook(LPVOID pTarget, LPVOID pDetour, LPVOID *ppOriginal);
     MH_STATUS WINAPI MH_CreateHookEx(ULONG_PTR hookIdent, LPVOID pTarget, LPVOID pDetour, LPVOID *ppOriginal);
 
@@ -152,6 +157,7 @@ extern "C" {
     //   ppOriginal  [out] A pointer to the trampoline function, which will be
     //                     used to call the original target function.
     //                     This parameter can be NULL.
+    //                     Refer to MH_CreateHook for more important details.
     MH_STATUS WINAPI MH_CreateHookApi(
         LPCWSTR pszModule, LPCSTR pszProcName, LPVOID pDetour, LPVOID *ppOriginal);
 
@@ -166,6 +172,7 @@ extern "C" {
     //   ppOriginal  [out] A pointer to the trampoline function, which will be
     //                     used to call the original target function.
     //                     This parameter can be NULL.
+    //                     Refer to MH_CreateHook for more important details.
     //   ppTarget    [out] A pointer to the target function, which will be used
     //                     with other functions.
     //                     This parameter can be NULL.
