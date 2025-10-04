@@ -79,6 +79,10 @@ typedef enum MH_STATUS
 
     // The specified function is not found.
     MH_ERROR_FUNCTION_NOT_FOUND,
+
+    // If continueOnError is TRUE (see MH_SetBulkOperationMode), some errors
+    // occurred during a bulk operation.
+    MH_ERROR_PARTIAL_FAILURE,
 } MH_STATUS;
 
 // The method of suspending and resuming threads.
