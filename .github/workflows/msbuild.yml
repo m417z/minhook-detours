@@ -16,13 +16,15 @@ env:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # windows-latest ships Visual Studio 2026, which has no v143 ARM64 build
+    # tools.
+    runs-on: windows-2022
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@v3
 
       - name: Build x86
         # Add additional options to the MSBuild command line here (like platform or verbosity level).
@@ -36,7 +38,7 @@ jobs:
         run: msbuild /m /p:Configuration=${{ env.BUILD_CONFIGURATION }} /p:Platform="ARM64" ${{ env.SOLUTION_FILE_PATH }}
 
       - name: Package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: minhook-detours
           path: |
