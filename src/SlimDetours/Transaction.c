@@ -17,6 +17,102 @@ static PHANDLE s_phSuspendedThreads = NULL;
 static ULONG s_ulSuspendedThreadCount = 0;
 static PDETOUR_OPERATION s_pPendingOperations = NULL;
 
+static
+PVOID
+detour_copy_target_instruction(
+    _In_opt_ PVOID pDst,
+    _In_ PVOID pSrc,
+    _Out_opt_ PVOID* ppTarget,
+    _Out_opt_ LONG* plExtra,
+    _In_ BOOL fTargetArm64Ec)
+{
+#if defined(_M_ARM64EC)
+    return fTargetArm64Ec ?
+        detour_copy_instruction_arm64(pDst, pSrc, ppTarget, plExtra) :
+        detour_copy_instruction(pDst, pSrc, ppTarget, plExtra);
+#elif defined(_M_ARM64)
+    UNREFERENCED_PARAMETER(fTargetArm64Ec);
+    return detour_copy_instruction_arm64(pDst, pSrc, ppTarget, plExtra);
+#else
+    UNREFERENCED_PARAMETER(fTargetArm64Ec);
+    return detour_copy_instruction(pDst, pSrc, ppTarget, plExtra);
+#endif
+}
+
+static
+BOOL
+detour_does_target_code_end_function(
+    _In_ PBYTE pbCode,
+    _In_ BOOL fTargetArm64Ec)
+{
+#if defined(_M_ARM64EC)
+    return fTargetArm64Ec ? detour_does_code_end_function_arm64(pbCode) : detour_does_code_end_function(pbCode);
+#elif defined(_M_ARM64)
+    UNREFERENCED_PARAMETER(fTargetArm64Ec);
+    return detour_does_code_end_function_arm64(pbCode);
+#else
+    UNREFERENCED_PARAMETER(fTargetArm64Ec);
+    return detour_does_code_end_function(pbCode);
+#endif
+}
+
+static
+ULONG
+detour_is_target_code_filler(
+    _In_ PBYTE pbCode,
+    _In_ BOOL fTargetArm64Ec)
+{
+#if defined(_M_ARM64EC)
+    return fTargetArm64Ec ? detour_is_code_filler_arm64(pbCode) : detour_is_code_filler(pbCode);
+#elif defined(_M_ARM64)
+    UNREFERENCED_PARAMETER(fTargetArm64Ec);
+    return detour_is_code_filler_arm64(pbCode);
+#else
+    UNREFERENCED_PARAMETER(fTargetArm64Ec);
+    return detour_is_code_filler(pbCode);
+#endif
+}
+
+// Whether the jmps of the given hook are the ones currently patched into its target.
+static
+BOOL
+detour_is_hook_at_target(
+    _In_ PDETOUR_OPERATION o)
+{
+#if defined(_M_ARM64EC)
+    if (o->fTargetArm64Ec)
+    {
+        return detour_is_jmp_indirect_to_arm64(o->pbTarget, (ULONG64*)&(o->pTrampoline->pbDetour));
+    } else
+    {
+        return detour_is_jmp_immediate_to(o->pbTarget, o->pTrampoline->rbCodeIn) &&
+            detour_is_jmp_indirect_to(o->pTrampoline->rbCodeIn, &o->pTrampoline->pbDetour);
+    }
+#elif defined(_M_IX86) || defined(_M_X64)
+    return detour_is_jmp_immediate_to(o->pbTarget, o->pTrampoline->rbCodeIn) &&
+        detour_is_jmp_indirect_to(o->pTrampoline->rbCodeIn, &o->pTrampoline->pbDetour);
+#elif defined(_M_ARM64)
+    return detour_is_jmp_indirect_to_arm64(o->pbTarget, (ULONG64*)&(o->pTrampoline->pbDetour));
+#endif
+}
+
+static
+PDETOUR_OPERATION
+detour_reverse_operations(
+    _In_opt_ PDETOUR_OPERATION pOperations)
+{
+    PDETOUR_OPERATION o, n, pReversed;
+
+    pReversed = NULL;
+    for (o = pOperations; o != NULL; o = n)
+    {
+        n = o->pNext;
+        o->pNext = pReversed;
+        pReversed = o;
+    }
+    return pReversed;
+}
+
 HRESULT
 NTAPI
 SlimDetoursTransactionBeginEx(
@@ -37,6 +133,7 @@ SlimDetoursTransactionBeginEx(
     Status = detour_writable_trampoline_regions();
     if (!NT_SUCCESS(Status))
     {
+        detour_runnable_trampoline_regions();
         goto fail;
     }
 
@@ -110,10 +207,13 @@ SlimDetoursTransactionAbort(VOID)
     detour_runnable_trampoline_regions();
 
     // Resume any suspended threads.
-    detour_thread_resume(s_phSuspendedThreads, s_ulSuspendedThreadCount);
+    if (s_phSuspendedThreads != NULL)
+    {
+        detour_thread_resume(s_phSuspendedThreads, s_ulSuspendedThreadCount);
+        s_phSuspendedThreads = NULL;
+        s_ulSuspendedThreadCount = 0;
+    }
 
-    s_phSuspendedThreads = NULL;
-    s_ulSuspendedThreadCount = 0;
     s_nPendingThreadId = NULL;
     return HRESULT_FROM_NT(STATUS_SUCCESS);
 }
@@ -130,6 +230,7 @@ SlimDetoursTransactionCommit(VOID)
     PDETOUR_OPERATION o, n, m;
     PBYTE pbCode;
     BOOL freed = FALSE;
+    BOOL fProgress;
     ULONG i;
 
     if (s_nPendingThreadId != NtCurrentThreadId())
@@ -142,26 +243,33 @@ SlimDetoursTransactionCommit(VOID)
         goto _exit;
     }
 
+    // Operations are prepended to the list, reverse it to handle them in the order they were
+    // requested. Chaining hooks on the same target in that order makes the one attached last the
+    // first one called, as it is when they are attached in separate transactions.
+    s_pPendingOperations = detour_reverse_operations(s_pPendingOperations);
+
     // Insert each of the detours.
     for (o = s_pPendingOperations; o != NULL; o = o->pNext)
     {
         if (o->dwOperation != DETOUR_OPERATION_ADD)
+        {
             continue;
+        }
 
         DETOUR_TRACE("detours: pbTramp =%p, pbRemain=%p, pbDetour=%p, cbRestore=%u\n",
-            o->pTrampoline,
-            o->pTrampoline->pbRemain,
-            o->pTrampoline->pbDetour,
-            o->pTrampoline->cbRestore);
+                     o->pTrampoline,
+                     o->pTrampoline->pbRemain,
+                     o->pTrampoline->pbDetour,
+                     o->pTrampoline->cbRestore);
 
         DETOUR_TRACE("detours: pbTarget=%p: "
-            "%02x %02x %02x %02x "
-            "%02x %02x %02x %02x "
-            "%02x %02x %02x %02x [before]\n",
-            o->pbTarget,
-            o->pbTarget[0], o->pbTarget[1], o->pbTarget[2], o->pbTarget[3],
-            o->pbTarget[4], o->pbTarget[5], o->pbTarget[6], o->pbTarget[7],
-            o->pbTarget[8], o->pbTarget[9], o->pbTarget[10], o->pbTarget[11]);
+                     "%02x %02x %02x %02x "
+                     "%02x %02x %02x %02x "
+                     "%02x %02x %02x %02x [before]\n",
+                     o->pbTarget,
+                     o->pbTarget[0], o->pbTarget[1], o->pbTarget[2], o->pbTarget[3],
+                     o->pbTarget[4], o->pbTarget[5], o->pbTarget[6], o->pbTarget[7],
+                     o->pbTarget[8], o->pbTarget[9], o->pbTarget[10], o->pbTarget[11]);
 
         m = NULL;
         if (!RtlEqualMemory(o->pbTarget, o->pTrampoline->rbRestore, o->pTrampoline->cbRestore))
@@ -175,88 +283,142 @@ SlimDetoursTransactionCommit(VOID)
                     m = n;
                 }
             }
+
+            // Without interference from outside the transaction, an earlier hook in it is the only
+            // thing that can have modified the target.
+            DETOUR_ASSERT(m != NULL);
         }
 
         if (m != NULL)
         {
-            DETOUR_TRACE("detours: chaining to last detour in the transaction\n");
+            DETOUR_TRACE("detours: chaining to the detour installed before it on the same target\n");
 
-#if defined(_X86_) || defined(_AMD64_)
+            // The hook is patched over the hook of m: its trampoline enters the detour of m
+            // instead of the moved target code, and detaching it puts the hook of m back.
+            //
+            // x64 jumps through the thunk of m, which does the pbDetour read itself, because an
+            // inline absolute destination reaches any trampoline while a RIP-relative operand is
+            // limited to +/-2GB. adrp covers +/-4GB, enough for trampolines of the same target.
+#if defined(_M_ARM64EC)
+            if (o->fTargetArm64Ec)
+            {
+                pbCode = detour_gen_jmp_indirect_arm64(o->pTrampoline->rbCode, (ULONG64*)&(m->pTrampoline->pbDetour));
+            } else
+            {
+                pbCode = detour_gen_jmp_aligned_literal(o->pTrampoline->rbCode, m->pTrampoline->rbCodeIn);
+            }
+#elif defined(_M_X64)
+            pbCode = detour_gen_jmp_aligned_literal(o->pTrampoline->rbCode, m->pTrampoline->rbCodeIn);
+#elif defined(_M_IX86)
             pbCode = detour_gen_jmp_indirect(o->pTrampoline->rbCode, &m->pTrampoline->pbDetour);
-#elif defined(_ARM64_)
-            pbCode = detour_gen_jmp_indirect(o->pTrampoline->rbCode, (ULONG64*)&(m->pTrampoline->pbDetour));
+#elif defined(_M_ARM64)
+            pbCode = detour_gen_jmp_indirect_arm64(o->pTrampoline->rbCode, (ULONG64*)&(m->pTrampoline->pbDetour));
 #endif
-            o->pTrampoline->cbCode = 0;
+            NtFlushInstructionCache(NtCurrentProcess(),
+                                    o->pTrampoline->rbCode,
+                                    pbCode - o->pTrampoline->rbCode);
 
-            CopyMemory(o->pTrampoline->rbRestore, o->pbTarget, m->pTrampoline->cbRestore);
+            // Both operations disassembled the same unpatched bytes at the same address.
+            DETOUR_ASSERT(m->pTrampoline->cbRestore == o->pTrampoline->cbRestore);
+
+            RtlCopyMemory(o->pTrampoline->rbRestore, o->pbTarget, m->pTrampoline->cbRestore);
             o->pTrampoline->cbRestore = m->pTrampoline->cbRestore;
 
+            // rbCode holds the thunk instead of moved target code, which has no alignment to map.
+            o->pTrampoline->cbCode = (BYTE)(pbCode - o->pTrampoline->rbCode);
             RtlZeroMemory(o->pTrampoline->rAlign, sizeof(o->pTrampoline->rAlign));
             o->pTrampoline->pbRemain = o->pbTarget + o->pTrampoline->cbRestore;
         }
 
-#if defined(_X86_) || defined(_AMD64_)
+#if defined(_M_ARM64EC)
+        if (o->fTargetArm64Ec)
+        {
+            pbCode = detour_gen_jmp_indirect_arm64(o->pbTarget, (ULONG64*)&(o->pTrampoline->pbDetour));
+            pbCode = detour_gen_brk_arm64(pbCode, o->pTrampoline->pbRemain);
+        } else
+        {
+            pbCode = detour_gen_jmp_indirect(o->pTrampoline->rbCodeIn, &o->pTrampoline->pbDetour);
+            NtFlushInstructionCache(NtCurrentProcess(),
+                                    o->pTrampoline->rbCodeIn,
+                                    pbCode - o->pTrampoline->rbCodeIn);
+            pbCode = detour_gen_jmp_immediate(o->pbTarget, o->pTrampoline->rbCodeIn);
+            pbCode = detour_gen_brk(pbCode, o->pTrampoline->pbRemain);
+        }
+#elif defined(_M_IX86) || defined(_M_X64)
         pbCode = detour_gen_jmp_indirect(o->pTrampoline->rbCodeIn, &o->pTrampoline->pbDetour);
         NtFlushInstructionCache(NtCurrentProcess(), o->pTrampoline->rbCodeIn, pbCode - o->pTrampoline->rbCodeIn);
         pbCode = detour_gen_jmp_immediate(o->pbTarget, o->pTrampoline->rbCodeIn);
-#elif defined(_ARM64_)
-        pbCode = detour_gen_jmp_indirect(o->pbTarget, (ULONG64*)&(o->pTrampoline->pbDetour));
-#endif
         pbCode = detour_gen_brk(pbCode, o->pTrampoline->pbRemain);
+#elif defined(_M_ARM64)
+        pbCode = detour_gen_jmp_indirect_arm64(o->pbTarget, (ULONG64*)&(o->pTrampoline->pbDetour));
+        pbCode = detour_gen_brk_arm64(pbCode, o->pTrampoline->pbRemain);
+#endif
         NtFlushInstructionCache(NtCurrentProcess(), o->pbTarget, pbCode - o->pbTarget);
-
         *o->ppbPointer = o->pTrampoline->rbCode;
+        UNREFERENCED_PARAMETER(pbCode);
 
         DETOUR_TRACE("detours: pbTarget=%p: "
-            "%02x %02x %02x %02x "
-            "%02x %02x %02x %02x "
-            "%02x %02x %02x %02x [after]\n",
-            o->pbTarget,
-            o->pbTarget[0], o->pbTarget[1], o->pbTarget[2], o->pbTarget[3],
-            o->pbTarget[4], o->pbTarget[5], o->pbTarget[6], o->pbTarget[7],
-            o->pbTarget[8], o->pbTarget[9], o->pbTarget[10], o->pbTarget[11]);
+                     "%02x %02x %02x %02x "
+                     "%02x %02x %02x %02x "
+                     "%02x %02x %02x %02x [after]\n",
+                     o->pbTarget,
+                     o->pbTarget[0], o->pbTarget[1], o->pbTarget[2], o->pbTarget[3],
+                     o->pbTarget[4], o->pbTarget[5], o->pbTarget[6], o->pbTarget[7],
+                     o->pbTarget[8], o->pbTarget[9], o->pbTarget[10], o->pbTarget[11]);
 
         DETOUR_TRACE("detours: pbTramp =%p: "
-            "%02x %02x %02x %02x "
-            "%02x %02x %02x %02x "
-            "%02x %02x %02x %02x\n",
-            o->pTrampoline,
-            o->pTrampoline->rbCode[0], o->pTrampoline->rbCode[1],
-            o->pTrampoline->rbCode[2], o->pTrampoline->rbCode[3],
-            o->pTrampoline->rbCode[4], o->pTrampoline->rbCode[5],
-            o->pTrampoline->rbCode[6], o->pTrampoline->rbCode[7],
-            o->pTrampoline->rbCode[8], o->pTrampoline->rbCode[9],
-            o->pTrampoline->rbCode[10], o->pTrampoline->rbCode[11]);
+                     "%02x %02x %02x %02x "
+                     "%02x %02x %02x %02x "
+                     "%02x %02x %02x %02x\n",
+                     o->pTrampoline,
+                     o->pTrampoline->rbCode[0], o->pTrampoline->rbCode[1],
+                     o->pTrampoline->rbCode[2], o->pTrampoline->rbCode[3],
+                     o->pTrampoline->rbCode[4], o->pTrampoline->rbCode[5],
+                     o->pTrampoline->rbCode[6], o->pTrampoline->rbCode[7],
+                     o->pTrampoline->rbCode[8], o->pTrampoline->rbCode[9],
+                     o->pTrampoline->rbCode[10], o->pTrampoline->rbCode[11]);
     }
 
-    // Remove each of the detours.
+    // Remove each of the detours. Hooks chained on the same target unwind outermost first: only the
+    // hook whose jmps are at the target can be restored, and restoring it puts back the hook it was
+    // patched over, which the next pass then finds at the target.
+    do
+    {
+        fProgress = FALSE;
+        for (o = s_pPendingOperations; o != NULL; o = o->pNext)
+        {
+            if (o->dwOperation != DETOUR_OPERATION_REMOVE || o->fIsRestored || !detour_is_hook_at_target(o))
+            {
+                continue;
+            }
+
+            RtlCopyMemory(o->pbTarget, o->pTrampoline->rbRestore, o->pTrampoline->cbRestore);
+            NtFlushInstructionCache(NtCurrentProcess(), o->pbTarget, o->pTrampoline->cbRestore);
+            o->fIsRestored = TRUE;
+            fProgress = TRUE;
+        }
+    } while (fProgress);
+
     for (o = s_pPendingOperations; o != NULL; o = o->pNext)
     {
         if (o->dwOperation != DETOUR_OPERATION_REMOVE)
+        {
             continue;
-
-        // Check if the jmps still points where we expect, otherwise someone might have hooked us.
-        BOOL hookIsStillThere =
-#if defined(_X86_) || defined(_AMD64_)
-            detour_is_jmp_immediate_to(o->pbTarget, o->pTrampoline->rbCodeIn) &&
-            detour_is_jmp_indirect_to(o->pTrampoline->rbCodeIn, &o->pTrampoline->pbDetour);
-#elif defined(_ARM64_)
-            detour_is_jmp_indirect_to(o->pbTarget, (ULONG64*)&(o->pTrampoline->pbDetour));
-#endif
-
-        if (hookIsStillThere)
-        {
-            RtlCopyMemory(o->pbTarget, o->pTrampoline->rbRestore, o->pTrampoline->cbRestore);
-            NtFlushInstructionCache(NtCurrentProcess(), o->pbTarget, o->pTrampoline->cbRestore);
-        } else
-        {
-            // Don't remove and leak trampoline in this case.
-            o->dwOperation = DETOUR_OPERATION_NONE;
-            DETOUR_TRACE("detours: Leaked hook on pbTarget=%p due to external hooking\n", o->pbTarget);
         }
 
-        // Put hook in bypass mode.
-        o->pTrampoline->pbDetour = o->pTrampoline->rbCode;
+        if (!o->fIsRestored)
+        {
+            // The hook is buried under one which is not removed here, or someone else hooked over
+            // it. Don't remove and leak trampoline in this case.
+            o->dwOperation = DETOUR_OPERATION_NONE;
+            DETOUR_TRACE("detours: Leaked hook on pbTarget=%p, another hook is patched over it\n", o->pbTarget);
+        }
+
+        if (o->dwOperation == DETOUR_OPERATION_NONE || o->ppTrampolineToFreeManually != NULL)
+        {
+            // The trampoline outlives the transaction, put the hook in bypass mode.
+            o->pTrampoline->pbDetour = o->pTrampoline->rbCode;
+        }
 
         *o->ppbPointer = o->pbTarget;
     }
@@ -266,6 +428,10 @@ SlimDetoursTransactionCommit(VOID)
     {
         detour_thread_update(s_phSuspendedThreads[i], s_pPendingOperations);
     }
+
+    // The page permissions have to be restored in the reverse of the order they were changed in:
+    // only the first operation on a page captured the permissions it had outside the transaction.
+    s_pPendingOperations = detour_reverse_operations(s_pPendingOperations);
 
     // Restore all of the page permissions and free any trampoline regions that are now unused.
     for (o = s_pPendingOperations; o != NULL;)
@@ -303,11 +469,14 @@ _exit:
     detour_runnable_trampoline_regions();
 
     // Resume any suspended threads.
-    detour_thread_resume(s_phSuspendedThreads, s_ulSuspendedThreadCount);
-    s_phSuspendedThreads = NULL;
-    s_ulSuspendedThreadCount = 0;
-    s_nPendingThreadId = NULL;
+    if (s_phSuspendedThreads != NULL)
+    {
+        detour_thread_resume(s_phSuspendedThreads, s_ulSuspendedThreadCount);
+        s_phSuspendedThreads = NULL;
+        s_ulSuspendedThreadCount = 0;
+    }
 
+    s_nPendingThreadId = NULL;
     return HRESULT_FROM_NT(STATUS_SUCCESS);
 }
 
@@ -321,6 +490,10 @@ SlimDetoursAttach(
     PVOID pMem;
     SIZE_T sMem;
     DWORD dwOld;
+    BOOL fTargetArm64Ec;
+#if defined(_M_ARM64EC)
+    BOOL fDetourArm64Ec;
+#endif
 
     if (s_nPendingThreadId != NtCurrentThreadId())
     {
@@ -330,9 +503,38 @@ SlimDetoursAttach(
     PBYTE pbTarget = (PBYTE)*ppPointer;
     PDETOUR_TRAMPOLINE pTrampoline = NULL;
     PDETOUR_OPERATION o = NULL;
-
+#if defined(_M_ARM64EC)
+    pbTarget = detour_skip_jmp_arm64ec(pbTarget, &fTargetArm64Ec);
+    pDetour = detour_skip_jmp_arm64ec((PBYTE)pDetour, &fDetourArm64Ec);
+    if (fTargetArm64Ec && !fDetourArm64Ec)
+    {
+        Status = STATUS_NOT_SUPPORTED;
+        DETOUR_BREAK();
+        goto fail;
+    }
+#elif defined(_M_X64)
+    if (detour_is_ec_code(pbTarget))
+    {
+        Status = STATUS_NOT_SUPPORTED;
+        goto fail;
+    }
+    pbTarget = detour_skip_jmp(pbTarget);
+    if (detour_is_ec_code(pbTarget))
+    {
+        Status = STATUS_NOT_SUPPORTED;
+        goto fail;
+    }
+    fTargetArm64Ec = FALSE;
+    pDetour = detour_skip_jmp((PBYTE)pDetour);
+#elif defined(_M_ARM64)
+    fTargetArm64Ec = FALSE;
+    pbTarget = detour_skip_jmp_arm64(pbTarget);
+    pDetour = detour_skip_jmp_arm64((PBYTE)pDetour);
+#else
+    fTargetArm64Ec = FALSE;
     pbTarget = (PBYTE)detour_skip_jmp(pbTarget);
     pDetour = detour_skip_jmp((PBYTE)pDetour);
+#endif
 
     // Don't follow a jump if its destination is the target function.
     // This happens when the detour does nothing other than call the target.
@@ -362,7 +564,7 @@ fail:
         return HRESULT_FROM_NT(Status);
     }
 
-    pTrampoline = detour_alloc_trampoline(pbTarget);
+    pTrampoline = detour_alloc_trampoline(pbTarget, fTargetArm64Ec);
     if (pTrampoline == NULL)
     {
         Status = STATUS_NO_MEMORY;
@@ -379,7 +581,11 @@ fail:
     PBYTE pbTrampoline = pTrampoline->rbCode;
     PBYTE pbPool = pbTrampoline + sizeof(pTrampoline->rbCode);
     ULONG cbTarget = 0;
-    ULONG cbJump = SIZE_OF_JMP;
+    ULONG cbJump =
+#if defined(_M_ARM64EC)
+        fTargetArm64Ec ? SIZE_OF_JMP_ARM64 :
+#endif
+        SIZE_OF_JMP;
     ULONG nAlign = 0;
 
     while (cbTarget < cbJump)
@@ -387,8 +593,8 @@ fail:
         PBYTE pbOp = pbSrc;
         LONG lExtra = 0;
 
-        DETOUR_TRACE(" SlimDetoursCopyInstruction(%p,%p)\n", pbTrampoline, pbSrc);
-        pbSrc = (PBYTE)SlimDetoursCopyInstruction(pbTrampoline, pbSrc, NULL, &lExtra);
+        DETOUR_TRACE(" detour_copy_target_instruction(%p,%p)\n", pbTrampoline, pbSrc);
+        pbSrc = (PBYTE)detour_copy_target_instruction(pbTrampoline, pbSrc, NULL, &lExtra, fTargetArm64Ec);
         if (pbSrc == NULL)
         {
             Status = STATUS_ILLEGAL_INSTRUCTION;
@@ -396,7 +602,7 @@ fail:
             goto fail;
         }
 
-        DETOUR_TRACE(" SlimDetoursCopyInstruction() = %p (%d bytes)\n", pbSrc, (int)(pbSrc - pbOp));
+        DETOUR_TRACE(" detour_copy_target_instruction() = %p (%d bytes)\n", pbSrc, (int)(pbSrc - pbOp));
         pbTrampoline += (pbSrc - pbOp) + lExtra;
         cbTarget = PtrOffset(pbTarget, pbSrc);
         pTrampoline->rAlign[nAlign].obTarget = (BYTE)cbTarget;
@@ -408,7 +614,7 @@ fail:
             break;
         }
 
-        if (detour_does_code_end_function(pbOp))
+        if (detour_does_target_code_end_function(pbOp, fTargetArm64Ec))
         {
             break;
         }
@@ -417,7 +623,7 @@ fail:
     // Consume, but don't duplicate padding if it is needed and available.
     while (cbTarget < cbJump)
     {
-        LONG cFiller = detour_is_code_filler(pbSrc);
+        LONG cFiller = detour_is_target_code_filler(pbSrc, fTargetArm64Ec);
         if (cFiller == 0)
         {
             break;
@@ -473,14 +679,26 @@ fail:
     pTrampoline->pbDetour = (PBYTE)pDetour;
 
     pbTrampoline = pTrampoline->rbCode + pTrampoline->cbCode;
-#if defined(_AMD64_)
+#if defined(_M_ARM64EC)
+    if (fTargetArm64Ec)
+    {
+        pbTrampoline = detour_gen_jmp_immediate_arm64(pbTrampoline, &pbPool, pTrampoline->pbRemain);
+        pbTrampoline = detour_gen_brk_arm64(pbTrampoline, pbPool);
+    } else
+    {
+        pbTrampoline = detour_gen_jmp_indirect(pbTrampoline, &pTrampoline->pbRemain);
+        pbTrampoline = detour_gen_brk(pbTrampoline, pbPool);
+    }
+#elif defined(_M_X64)
     pbTrampoline = detour_gen_jmp_indirect(pbTrampoline, &pTrampoline->pbRemain);
-#elif defined(_X86_)
-    pbTrampoline = detour_gen_jmp_immediate(pbTrampoline, pTrampoline->pbRemain);
-#elif defined(_ARM64_)
-    pbTrampoline = detour_gen_jmp_immediate(pbTrampoline, &pbPool, pTrampoline->pbRemain);
-#endif
     pbTrampoline = detour_gen_brk(pbTrampoline, pbPool);
+#elif defined(_M_IX86)
+    pbTrampoline = detour_gen_jmp_immediate(pbTrampoline, pTrampoline->pbRemain);
+    pbTrampoline = detour_gen_brk(pbTrampoline, pbPool);
+#elif defined(_M_ARM64)
+    pbTrampoline = detour_gen_jmp_immediate_arm64(pbTrampoline, &pbPool, pTrampoline->pbRemain);
+    pbTrampoline = detour_gen_brk_arm64(pbTrampoline, pbPool);
+#endif
     UNREFERENCED_PARAMETER(pbTrampoline);
 
     pMem = pbTarget;
@@ -513,10 +731,15 @@ fail:
                  pTrampoline->rbCode[10], pTrampoline->rbCode[11]);
 
     o->dwOperation = DETOUR_OPERATION_ADD;
+    o->fIsRestored = FALSE;
+#if defined(_M_ARM64EC)
+    o->fTargetArm64Ec = fTargetArm64Ec;
+#endif
     o->ppbPointer = (PBYTE*)ppPointer;
     o->pTrampoline = pTrampoline;
     o->pbTarget = pbTarget;
     o->dwPerm = dwOld;
+    o->ppTrampolineToFreeManually = NULL;
     o->pNext = s_pPendingOperations;
     s_pPendingOperations = o;
 
@@ -534,6 +757,14 @@ SlimDetoursDetachEx(
     PVOID pMem;
     SIZE_T sMem;
     DWORD dwOld;
+#if defined(_M_ARM64EC)
+    BOOL fTargetArm64Ec, fDetourArm64Ec;
+#endif
+
+    if (pOptions->ppTrampolineToFreeManually != NULL)
+    {
+        *pOptions->ppTrampolineToFreeManually = NULL;
+    }
 
     if (s_nPendingThreadId != NtCurrentThreadId())
     {
@@ -554,7 +785,20 @@ fail:
     }
 
     PDETOUR_TRAMPOLINE pTrampoline = (PDETOUR_TRAMPOLINE)*ppPointer;
+#if defined(_M_ARM64EC)
+    fTargetArm64Ec = detour_is_ec_code(pTrampoline->rbCode);
+    pDetour = detour_skip_jmp_arm64ec((PBYTE)pDetour, &fDetourArm64Ec);
+    if (fTargetArm64Ec && !fDetourArm64Ec)
+    {
+        Status = STATUS_NOT_SUPPORTED;
+        DETOUR_BREAK();
+        goto fail;
+    }
+#elif defined(_M_ARM64)
+    pDetour = detour_skip_jmp_arm64((PBYTE)pDetour);
+#else
     pDetour = detour_skip_jmp((PBYTE)pDetour);
+#endif
 
     ////////////////////////////////////// Verify that Trampoline is in place.
     //
@@ -577,6 +821,10 @@ fail:
     }
 
     o->dwOperation = DETOUR_OPERATION_REMOVE;
+    o->fIsRestored = FALSE;
+#if defined(_M_ARM64EC)
+    o->fTargetArm64Ec = fTargetArm64Ec;
+#endif
     o->ppbPointer = (PBYTE*)ppPointer;
     o->pTrampoline = pTrampoline;
     o->pbTarget = pbTarget;
@@ -591,8 +839,10 @@ fail:
 HRESULT
 NTAPI
 SlimDetoursFreeTrampoline(
-    _In_ PVOID pTrampoline)
+    _Frees_ptr_opt_ _Post_invalid_ PVOID pTrampoline)
 {
+    NTSTATUS Status;
+
     if (pTrampoline == NULL)
     {
         return HRESULT_FROM_NT(STATUS_SUCCESS);
@@ -606,31 +856,19 @@ SlimDetoursFreeTrampoline(
         return HRESULT_FROM_NT(STATUS_TRANSACTIONAL_CONFLICT);
     }
 
-    NTSTATUS Status;
-
-    if (!bInTransaction)
+    // Make sure the trampoline pages are writable.
+    Status = bInTransaction ? STATUS_SUCCESS : detour_writable_trampoline_regions();
+    if (NT_SUCCESS(Status))
     {
-        // Make sure the trampoline pages are writable.
-        Status = detour_writable_trampoline_regions();
-        if (!NT_SUCCESS(Status))
-        {
-            goto fail;
-        }
+        detour_free_trampoline((PDETOUR_TRAMPOLINE)pTrampoline);
+        detour_free_trampoline_region_if_unused((PDETOUR_TRAMPOLINE)pTrampoline);
     }
 
-    detour_free_trampoline((PDETOUR_TRAMPOLINE)pTrampoline);
-    detour_free_trampoline_region_if_unused((PDETOUR_TRAMPOLINE)pTrampoline);
-
     if (!bInTransaction)
     {
+        // Make sure the trampoline pages are no longer writable, including the ones that were
+        // already flipped when detour_writable_trampoline_regions failed part way through.
         detour_runnable_trampoline_regions();
-    }
-
-    Status = STATUS_SUCCESS;
-
-fail:
-    if (!bInTransaction)
-    {
 #ifdef _MSC_VER
 #pragma warning(disable: __WARNING_INTERLOCKED_ACCESS)
 #endif

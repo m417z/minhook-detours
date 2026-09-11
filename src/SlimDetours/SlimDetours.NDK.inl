@@ -4,7 +4,7 @@
  * SlimDetours uses KNSoft.NDK by default, and also support other NDKs.
  * 
  * KNSoft.NDK
- *   Used when macro `_USE_KNSOFT_NDK` is defined, this is the default behavior on offical project.
+ *   Used when macro `_USE_KNSOFT_NDK` is defined, this is the default behavior on official project.
  * 
  * ReactOS NDK
  *   Used when macro `__REACTOS__` is defined, can be built with ReactOS.
@@ -46,14 +46,27 @@
 #undef NtCurrentProcessId
 #undef NtCurrentThreadId
 
+/*
+ * SlimDetours uses RtlIsEcCode on x64 to detect ARM64EC code, and KNSoft.NDK
+ * declares it for every architecture. phnt declares it for ARM64EC only.
+ */
+#if defined(_M_X64) && !defined(_M_ARM64EC)
+NTSYSAPI
+BOOLEAN
+NTAPI
+RtlIsEcCode(
+    _In_ ULONG64 CodePointer
+);
+#endif
+
 #define PAGE_SIZE 0x1000
 #define MM_ALLOCATION_GRANULARITY 0x10000
 
-#if defined(_X86_)
+#if defined(_M_IX86)
 #define CONTEXT_PC Eip
-#elif defined(_AMD64_)
+#elif defined(_M_X64)
 #define CONTEXT_PC Rip
-#elif defined(_ARM64_)
+#elif defined(_M_ARM64)
 #define CONTEXT_PC Pc
 #endif
 
@@ -78,11 +91,10 @@
 
 #endif
 
-C_ASSERT((ULONG_PTR)MI_ASLR_HIGHEST_SYSTEM_RANGE_ADDRESS - (ULONG_PTR)MI_ASLR_LOWEST_SYSTEM_RANGE_ADDRESS + 1 == (ULONG_PTR)MI_ASLR_BITMAP_SIZE * 8UL * (ULONG_PTR)MM_ALLOCATION_GRANULARITY);
+_STATIC_ASSERT((ULONG_PTR)MI_ASLR_HIGHEST_SYSTEM_RANGE_ADDRESS - (ULONG_PTR)MI_ASLR_LOWEST_SYSTEM_RANGE_ADDRESS + 1 == (ULONG_PTR)MI_ASLR_BITMAP_SIZE * 8UL * (ULONG_PTR)MM_ALLOCATION_GRANULARITY);
 
 #define NtCurrentProcessId() ((HANDLE)NtCurrentTeb()->ClientId.UniqueProcess)
 #define NtCurrentThreadId() ((HANDLE)NtCurrentTeb()->ClientId.UniqueThread)
-#define NtGetNtdllBase() (CONTAINING_RECORD(NtCurrentPeb()->Ldr->InInitializationOrderModuleList.Flink, LDR_DATA_TABLE_ENTRY, InInitializationOrderLinks)->DllBase)
 
 #define RtlProcessHeap() (NtCurrentPeb()->ProcessHeap)
 
@@ -110,8 +122,11 @@ C_ASSERT((ULONG_PTR)MI_ASLR_HIGHEST_SYSTEM_RANGE_ADDRESS - (ULONG_PTR)MI_ASLR_LO
 #define _2GB    _GB(2)
 #define _32GB   _GB(32)
 
+#ifndef MM_SHARED_USER_DATA_VA
 #define MM_SHARED_USER_DATA_VA 0x7FFE0000
-
+#endif
+#ifndef SharedUserData
 #define SharedUserData ((KUSER_SHARED_DATA * const)MM_SHARED_USER_DATA_VA)
+#endif
 
 #endif

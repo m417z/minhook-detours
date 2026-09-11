@@ -14,8 +14,8 @@
 
 #include <Windows.h>
 
-#if !defined(_X86_) && !defined(_AMD64_) && !defined(_ARM64_)
-#error Unsupported architecture (x86, amd64, arm64)
+#if !defined(_M_IX86) && !defined(_M_X64) && !defined(_M_ARM64) && !defined(_M_ARM64EC)
+#error Unsupported architecture (x86, x64, arm64, arm64ec)
 #endif
 
 #ifdef __cplusplus
@@ -64,7 +64,11 @@ SlimDetoursAttach(
 
 typedef struct _DETOUR_DETACH_OPTIONS
 {
-    PVOID *ppTrampolineToFreeManually;
+    // Receives the trampoline of the detached hook, to be released by the caller with
+    // SlimDetoursFreeTrampoline, or NULL to let the transaction release it. It is written when the
+    // transaction commits, so the variable must stay alive until then, and is set to NULL when
+    // there is no trampoline to release.
+    PVOID* ppTrampolineToFreeManually;
 } DETOUR_DETACH_OPTIONS, *PDETOUR_DETACH_OPTIONS;
 
 typedef const DETOUR_DETACH_OPTIONS* PCDETOUR_DETACH_OPTIONS;
@@ -87,16 +91,18 @@ SlimDetoursDetach(
     return SlimDetoursDetachEx(ppPointer, pDetour, &Options);
 }
 
+// Release a trampoline taken over via DETOUR_DETACH_OPTIONS.
 HRESULT
 NTAPI
 SlimDetoursFreeTrampoline(
-    _In_ PVOID pTrampoline);
+    _Frees_ptr_opt_ _Post_invalid_ PVOID pTrampoline);
 
 PVOID
 NTAPI
 SlimDetoursCodeFromPointer(
     _In_ PVOID pPointer);
 
+_Success_(return != NULL)
 PVOID
 NTAPI
 SlimDetoursCopyInstruction(
@@ -105,6 +111,7 @@ SlimDetoursCopyInstruction(
     _Out_opt_ PVOID* ppTarget,
     _Out_opt_ LONG* plExtra);
 
+// The caller must ensure no other thread is using SlimDetours during uninitialization.
 HRESULT
 NTAPI
 SlimDetoursUninitialize(VOID);

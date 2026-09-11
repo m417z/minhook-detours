@@ -64,15 +64,39 @@ static SYSTEM_BASIC_INFORMATION g_sbi = {
 #endif
 };
 
+/*
+ * ARM64EC Support
+ */
+
+#if defined(_M_X64) || defined(_M_ARM64EC)
+
+static CONST ANSI_STRING g_asRtlIsEcCode = RTL_CONSTANT_STRING("RtlIsEcCode");
+static typeof(&RtlIsEcCode) g_pfnRtlIsEcCode = NULL;
+
+#endif
+
+#if defined(_M_ARM64EC)
+
+static CONST ANSI_STRING g_asNtAllocateVirtualMemoryEx = RTL_CONSTANT_STRING("NtAllocateVirtualMemoryEx");
+static typeof(&NtAllocateVirtualMemoryEx) g_pfnNtAllocateVirtualMemoryEx = NULL;
+
+#define DETOUR_MEMORY_HEAP_INITIALIZING ((HANDLE)(LONG_PTR)-1)
+#define DETOUR_MEMORY_HEAP_UNINITIALIZING ((HANDLE)(LONG_PTR)-2)
+static _Interlocked_operand_ HANDLE volatile _detour_memory_heap = NULL;
+
+#else
+
 static HANDLE _detour_memory_heap = NULL;
+
+#endif
 
 #if defined(_WIN64)
 static
 _Success_(return != NULL)
 PVOID
-GetNtdllBase(VOID)
+detour_memory_get_ntdll(VOID)
 {
-    /* Get the first loaded entry */
+    /* Get the first initialized entry */
     PLDR_DATA_TABLE_ENTRY Entry = CONTAINING_RECORD(NtCurrentPeb()->Ldr->InInitializationOrderModuleList.Flink,
                                                     LDR_DATA_TABLE_ENTRY,
                                                     InInitializationOrderLinks);
@@ -98,7 +122,6 @@ GetNtdllBase(VOID)
  * this function returns FALSE if the option was set to 0 explicitly.
  */
 static
-FORCEINLINE
 BOOL
 detour_memory_is_aslr_enabled(VOID)
 {
@@ -125,13 +148,38 @@ detour_memory_is_aslr_enabled(VOID)
             *(PDWORD)stRegValue.BaseType.Data != 0);
 }
 
+// ARM64EC APIs can initialize memory outside a transaction, so gate concurrent initialization.
 VOID
 detour_memory_init(VOID)
 {
+    HANDLE Heap;
+
+#if defined(_M_ARM64EC)
+    while ((Heap = _InterlockedCompareExchangePointer(&_detour_memory_heap,
+                                                      DETOUR_MEMORY_HEAP_INITIALIZING,
+                                                      NULL)) != NULL)
+    {
+        while (Heap == DETOUR_MEMORY_HEAP_INITIALIZING || Heap == DETOUR_MEMORY_HEAP_UNINITIALIZING)
+        {
+            NtYieldExecution();
+            Heap = _InterlockedCompareExchangePointer(&_detour_memory_heap, NULL, NULL);
+        }
+
+        if (Heap != NULL)
+        {
+            return;
+        }
+    }
+#else
     if (_detour_memory_heap != NULL)
     {
         return;
     }
+#endif
+
+#if defined(_WIN64)
+    PVOID NtdllBase = detour_memory_get_ntdll();
+#endif
 
     /* Initialize memory management information */
     NtQuerySystemInformation(SystemBasicInformation, &g_sbi, sizeof(g_sbi), NULL);
@@ -144,22 +192,16 @@ detour_memory_init(VOID)
         {
 #if defined(_WIN64)
             /* 1GB after Ntdll.dll */
-            PVOID NtdllBase = GetNtdllBase();
 
             /*
              * Ntdll.dll is expected to be loaded in the system reserved region.
              * If that's not the case, e.g. due to future changes in Windows or
              * EDR tampering, we fall back to the non-ASLR reserved region.
-             * 
+             *
              * Currently, SYSTEM_RESERVED_REGION_HIGHEST is 0x00007FFFFFFEFFFFULL on 64-bit Windows,
              * which is the maximum user mode address, so here we compare with SYSTEM_RESERVED_REGION_LOWEST only.
              */
-            if ((ULONG_PTR)NtdllBase < SYSTEM_RESERVED_REGION_LOWEST)
-            {
-                NtdllBase = NULL;
-            }
-
-            if (NtdllBase)
+            if ((ULONG_PTR)NtdllBase >= SYSTEM_RESERVED_REGION_LOWEST)
             {
                 /*
                  * Note: The Ntdll.dll region isn't excluded, but it's already
@@ -195,6 +237,18 @@ detour_memory_init(VOID)
 #endif
                 + 1;
         }
+#if defined(_M_X64) || defined(_M_ARM64EC)
+        LdrGetProcedureAddress(NtdllBase,
+                               (PANSI_STRING)&g_asRtlIsEcCode,
+                               0,
+                               (PVOID*)&g_pfnRtlIsEcCode);
+#endif
+#if defined(_M_ARM64EC)
+        LdrGetProcedureAddress(NtdllBase,
+                               (PANSI_STRING)&g_asNtAllocateVirtualMemoryEx,
+                               0,
+                               (PVOID*)&g_pfnNtAllocateVirtualMemoryEx);
+#endif
     } else
     {
         /*
@@ -206,12 +260,17 @@ detour_memory_init(VOID)
     }
 
     /* Initialize private heap */
-    _detour_memory_heap = RtlCreateHeap(HEAP_NO_SERIALIZE | HEAP_GROWABLE, NULL, 0, 0, NULL, NULL);
-    if (_detour_memory_heap == NULL)
+    Heap = RtlCreateHeap(HEAP_NO_SERIALIZE | HEAP_GROWABLE, NULL, 0, 0, NULL, NULL);
+    if (Heap == NULL)
     {
         DETOUR_TRACE("RtlCreateHeap failed, fallback to use process default heap\n");
-        _detour_memory_heap = RtlProcessHeap();
+        Heap = RtlProcessHeap();
     }
+#if defined(_M_ARM64EC)
+    _InterlockedExchangePointer(&_detour_memory_heap, Heap);
+#else
+    _detour_memory_heap = Heap;
+#endif
 }
 
 _Must_inspect_result_
@@ -237,7 +296,7 @@ detour_memory_realloc(
 
 BOOL
 detour_memory_free(
-    _Frees_ptr_ PVOID BaseAddress)
+    _Frees_ptr_opt_ _Post_invalid_ PVOID BaseAddress)
 {
     return RtlFreeHeap(_detour_memory_heap, 0, BaseAddress);
 }
@@ -245,13 +304,29 @@ detour_memory_free(
 BOOL
 detour_memory_uninitialize(VOID)
 {
-    if (_detour_memory_heap != NULL && _detour_memory_heap != RtlProcessHeap())
+    HANDLE Heap;
+
+#if defined(_M_ARM64EC)
+    Heap = _InterlockedExchangePointer(&_detour_memory_heap, DETOUR_MEMORY_HEAP_UNINITIALIZING);
+#else
+    Heap = _detour_memory_heap;
+#endif
+
+    if (Heap == RtlProcessHeap())
     {
-        _detour_memory_heap = RtlDestroyHeap(_detour_memory_heap);
-        return _detour_memory_heap == NULL;
+        Heap = NULL;
+    } else if (Heap != NULL)
+    {
+        Heap = RtlDestroyHeap(Heap);
     }
 
-    return TRUE;
+#if defined(_M_ARM64EC)
+    _InterlockedExchangePointer(&_detour_memory_heap, Heap);
+#else
+    _detour_memory_heap = Heap;
+#endif
+
+    return Heap == NULL;
 }
 
 BOOL
@@ -274,7 +349,7 @@ detour_memory_2gb_below(
 {
     return (ULONG_PTR)Address > g_sbi.MinimumUserModeAddress + _2GB ?
         (PBYTE)Address - (_2GB - _512KB) :
-        (PVOID)(g_sbi.MinimumUserModeAddress + _512KB);
+        (PVOID)(ULONG_PTR)(g_sbi.MinimumUserModeAddress + _512KB);
 }
 
 _Ret_notnull_
@@ -288,5 +363,54 @@ detour_memory_2gb_above(
 #endif
         (ULONG_PTR)Address <= g_sbi.MaximumUserModeAddress - _2GB) ?
         (PBYTE)Address + (_2GB - _512KB) :
-        (PVOID)(g_sbi.MaximumUserModeAddress - _512KB);
+        (PVOID)(ULONG_PTR)(g_sbi.MaximumUserModeAddress - _512KB);
+}
+
+#if defined(_M_X64) || defined(_M_ARM64EC)
+
+BOOL
+detour_is_ec_code(
+    _In_ PVOID Address)
+{
+    return g_pfnRtlIsEcCode != NULL && g_pfnRtlIsEcCode((DWORD64)Address);
+}
+
+#endif
+
+NTSTATUS
+detour_alloc_region(
+    _Inout_ PVOID* ppBaseAddress,
+    _Inout_ PSIZE_T pRegionSize,
+    _In_ BOOL fEcCode)
+{
+#if defined(_M_ARM64EC)
+    if (fEcCode)
+    {
+        MEM_EXTENDED_PARAMETER Parameter = { 0 };
+
+        if (g_pfnNtAllocateVirtualMemoryEx == NULL)
+        {
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        Parameter.Type = MemExtendedParameterAttributeFlags;
+        Parameter.ULong64 = MEM_EXTENDED_PARAMETER_EC_CODE;
+        return g_pfnNtAllocateVirtualMemoryEx(NtCurrentProcess(),
+                                              ppBaseAddress,
+                                              pRegionSize,
+                                              MEM_COMMIT | MEM_RESERVE,
+                                              PAGE_EXECUTE_READWRITE,
+                                              &Parameter,
+                                              1);
+    }
+#else
+    UNREFERENCED_PARAMETER(fEcCode);
+#endif
+
+    return NtAllocateVirtualMemory(NtCurrentProcess(),
+                                   ppBaseAddress,
+                                   0,
+                                   pRegionSize,
+                                   MEM_COMMIT | MEM_RESERVE,
+                                   PAGE_EXECUTE_READWRITE);
 }
